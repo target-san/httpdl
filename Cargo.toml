@@ -5,7 +5,6 @@ authors = ["Igor Baidiuk <ibaidiuk@amcbridge.com>"]
 
 [dependencies]
 clap = "*"
-thread-id = "*"
 thread-scoped = "*"
 
 [dependencies.hyper]
