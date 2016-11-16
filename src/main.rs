@@ -10,17 +10,9 @@ use std::collections::{HashMap};
 
 use thread_scoped::scoped;
 
-fn pull_files<'a, I>(n_children: usize, dest_folder: &'a Path, list: &'a Mutex<I>)
+fn pull_files<'a, I>(dest_folder: &'a Path, list: &'a Mutex<I>)
     where I: Iterator<Item = (&'a str, Vec<&'a str>)> + Send
 {
-    // If child processing threads are required, then construct scoped thread
-    // which would receive all the arguments and children count reduced by 1
-    let child_thread_guard =
-        if n_children == 0 { None }
-        else {
-            Some(unsafe { scoped(|| pull_files(n_children - 1, dest_folder, list)) })
-        };
-
     loop {
         // Having this as separate expression should prevent locking for the whole duration
         let item = list.lock().unwrap().next();
@@ -61,8 +53,17 @@ fn main() {
         .map(|n| usize::from_str(n)).unwrap_or(1);*/
 
     let files_map: HashMap<&str, Vec<&str>> = HashMap::new();
-
+    // TODO: fill files map
     let files_seq = Mutex::new(files_map.into_iter().fuse());
-
-    pull_files(threads_num - 1, dest_dir, &files_seq);
+    // Now, create N - 1 worker threads and each will pull files
+    // Looks simpler than fancy tricks like recursive guards
+    let mut worker_guards = Vec::with_capacity(threads_num);
+    for _ in 1..threads_num {
+        worker_guards.push(
+            unsafe { scoped(|| pull_files(dest_dir, &files_seq)) }
+        );
+    }
+    // Main thread would do just the same as worker ones, summing up to N threads
+    pull_files(dest_dir, &files_seq);
+    // Vector of guards will stop right here
 }
