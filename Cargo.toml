@@ -1,7 +1,7 @@
 [package]
 name = "httpdl"
 version = "0.1.0"
-authors = ["Igor Baidiuk <ibaidiuk@amcbridge.com>"]
+authors = ["Igor Baidiuk <target.san@gmail.com>"]
 
 [dependencies]
 clap = "*"
