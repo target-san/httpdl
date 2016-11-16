@@ -1,0 +1,14 @@
+[package]
+name = "httpdl"
+version = "0.1.0"
+authors = ["Igor Baidiuk <ibaidiuk@amcbridge.com>"]
+
+[dependencies]
+clap = "*"
+thread-id = "*"
+thread-scoped = "*"
+
+[dependencies.hyper]
+version = "*"
+default-features = false
+features = []
