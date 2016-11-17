@@ -6,16 +6,14 @@ extern crate thread_scoped;
 use std::process::exit;
 use std::fmt::Arguments;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::str::FromStr;
-use std::path::Path;
 use std::sync::{Mutex};
-use std::collections::{HashMap};
 
 use thread_scoped::scoped;
 
 fn pull_files<'a, I>(dest_folder: &'a str, list: &'a Mutex<I>)
-    where I: Iterator<Item = (&'a str, Vec<&'a str>)> + Send
+    where I: Iterator<Item = (&'a str, &'a str)> + Send
 {
     loop {
         // Having this as separate expression should prevent locking for the whole duration
@@ -80,7 +78,7 @@ fn main() {
     // Read and parse download speed limit
     let speed_limit = match args.value_of("speed_limit") {
         None => 0,
-        Some(value) => 0 // TODO: proper parsing
+        Some(_) => fail_arg("speed_limit", format_args!("not supported for now, sorry"))
     };
     // Read and parse number of threads which should be used
     let threads_num = match args.value_of("threads_num") {
@@ -92,8 +90,29 @@ fn main() {
         }
     };
 
-    let files_map: HashMap<&str, Vec<&str>> = HashMap::new();
-    // TODO: fill files map
+    // Now, we read whole list file and then fill files mapping
+    let all_text = match fs::File::open(list_file) {
+        Err(_) => fail_arg("list_file", format_args!("failed to open")),
+        Ok(mut fd) => {
+            let mut text = String::new();
+            if let Err(_) = fd.read_to_string(&mut text) {
+                fail_arg("list_file", format_args!("failed to read"));
+            }
+            text
+        }
+    };
+    let mut files_map: Vec<(&str, &str)> = Vec::new();
+    // Next iterate all lines in file and get URLs and file names from them
+    for line in all_text.lines() {
+        let mut pieces = line.split(|c| " \r\n\t".contains(c)).filter(|s| !s.is_empty());
+        let url = pieces.next();
+        let filename = pieces.next();
+        if let (Some(url_value), Some(fname_value)) = (url, filename) {
+            files_map.push((url_value, fname_value));
+        }
+    }
+    // Finally, when we just need to consume all this in random order,
+    // transform it into consuming iterator and pack under mutex
     let files_seq = Mutex::new(files_map.into_iter().fuse());
     // Now, create N - 1 worker threads and each will pull files
     // Looks simpler than fancy tricks like recursive guards
