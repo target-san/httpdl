@@ -4,8 +4,10 @@ version = "0.1.0"
 authors = ["Igor Baidiuk <target.san@gmail.com>"]
 
 [dependencies]
-clap = "*"
-thread-scoped = "*"
+clap            = "*"
+log             = "*"
+simplelog       = "*"
+thread-scoped   = "*"
 
 [dependencies.hyper]
 version = "*"

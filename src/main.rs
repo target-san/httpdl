@@ -1,5 +1,8 @@
 #[macro_use]
 extern crate clap;
+#[macro_use]
+extern crate log;
+extern crate simplelog;
 extern crate hyper;
 extern crate thread_scoped;
 
@@ -10,25 +13,39 @@ use std::io::{self, Read, Write};
 use std::str::FromStr;
 use std::sync::{Mutex};
 
+use simplelog::{ TermLogger, LogLevel, LogLevelFilter, Config };
+
 use thread_scoped::scoped;
 
-fn pull_files<'a, I>(dest_folder: &'a str, list: &'a Mutex<I>)
+fn pull_files<'a, I>(thread_num: usize, dest_dir: &'a str, list: &'a Mutex<I>)
     where I: Iterator<Item = (&'a str, &'a str)> + Send
 {
+    debug!("worker thread #{} started", thread_num);
     loop {
         // Having this as separate expression should prevent locking for the whole duration
         let item = list.lock().unwrap().next();
         match item {
-            None => return,
-            Some((url, dests)) => {
+            None => break,
+            Some((url, dest)) => {
                 let client = hyper::Client::new();
+                info!("#{}: {} -> {}/{}\n", thread_num, url, dest_dir, dest);
                 // TODO: load each acquired URL here
             }
         }
     }
+    debug!("worker thread #{} finished", thread_num);
 }
 
 fn main() {
+    let _ = TermLogger::init(
+        LogLevelFilter::Trace,
+        Config {
+            time:       Some(LogLevel::Trace),
+            level:      Some(LogLevel::Trace),
+            target:     None,
+            location:   Some(LogLevel::Trace)
+        }
+    );
     // First, configure our command line
     let args = clap_app!(httpdl =>
         (version: crate_version!())
@@ -117,12 +134,13 @@ fn main() {
     // Now, create N - 1 worker threads and each will pull files
     // Looks simpler than fancy tricks like recursive guards
     let mut worker_guards = Vec::with_capacity(threads_num);
-    for _ in 1..threads_num {
+    for i in 1..threads_num {
+        let seq_ref = &files_seq; // thus we can move reference to seq into closure
         worker_guards.push(
-            unsafe { scoped(|| pull_files(dest_dir, &files_seq)) }
+            unsafe { scoped(move || pull_files(i, dest_dir, seq_ref)) }
         );
     }
     // Main thread would do just the same as worker ones, summing up to N threads
-    pull_files(dest_dir, &files_seq);
+    pull_files(0, dest_dir, &files_seq);
     // Vector of guards will stop right here
 }
