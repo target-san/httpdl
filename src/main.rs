@@ -2,7 +2,7 @@
 extern crate clap;
 #[macro_use]
 extern crate log;
-extern crate simplelog;
+extern crate env_logger;
 extern crate hyper;
 extern crate thread_scoped;
 
@@ -12,8 +12,6 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::str::FromStr;
 use std::sync::{Mutex};
-
-use simplelog::{ TermLogger, LogLevel, LogLevelFilter, Config };
 
 use thread_scoped::scoped;
 
@@ -37,15 +35,7 @@ fn pull_files<'a, I>(thread_num: usize, dest_dir: &'a str, list: &'a Mutex<I>)
 }
 
 fn main() {
-    let _ = TermLogger::init(
-        LogLevelFilter::Trace,
-        Config {
-            time:       Some(LogLevel::Trace),
-            level:      Some(LogLevel::Trace),
-            target:     None,
-            location:   Some(LogLevel::Trace)
-        }
-    );
+    let _ = env_logger::init().unwrap();
     // First, configure our command line
     let args = clap_app!(httpdl =>
         (version: crate_version!())

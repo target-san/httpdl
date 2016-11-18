@@ -6,7 +6,7 @@ authors = ["Igor Baidiuk <target.san@gmail.com>"]
 [dependencies]
 clap            = "*"
 log             = "*"
-simplelog       = "*"
+env_logger      = "*"
 thread-scoped   = "*"
 
 [dependencies.hyper]
