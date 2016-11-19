@@ -15,21 +15,44 @@ use std::sync::{Mutex};
 
 use thread_scoped::scoped;
 
+macro_rules! unoption_or {
+    ($source:expr => $on_none:expr) => (
+        match $source {
+            Some(val) => val,
+            None => $on_none
+        }
+    )
+}
+
+macro_rules! unresult_or {
+    ($source:expr => || $on_err:expr) => (
+        match $source {
+            Ok(val)  => val,
+            Err(_) => $on_err
+        }
+    );
+    ($source:expr => |$var:ident| $on_err:expr) => (
+        match $source {
+            Ok(val)  => val,
+            Err($var) => $on_err
+        }
+    )
+}
+
 fn pull_files<'a, I>(thread_num: usize, dest_dir: &'a str, list: &'a Mutex<I>)
     where I: Iterator<Item = (&'a str, &'a str)> + Send
 {
-    debug!("worker thread #{} started", thread_num);
+    info!("worker thread #{} started", thread_num);
     loop {
         // Having this as separate expression should prevent locking for the whole duration
-        let item = list.lock().unwrap().next();
-        match item {
-            None => break,
-            Some((url, dest)) => {
-                let client = hyper::Client::new();
-                info!("#{}: {} -> {}/{}\n", thread_num, url, dest_dir, dest);
-                // TODO: load each acquired URL here
+        let (url, dest) = unoption_or!(list.lock().unwrap().next() => break);
+        debug!("#{}: {} -> {}/{}\n", thread_num, url, dest_dir, dest);
+        let response = unresult_or!(hyper::Client::new().get(url).send() =>
+            |err| {
+                error!("#{}: request {} -> {}/{} failed: {}", thread_num, url, dest_dir, dest, err);
+                continue;
             }
-        }
+        );
     }
     debug!("worker thread #{} finished", thread_num);
 }
@@ -64,22 +87,22 @@ fn main() {
     // NB: can unwrap because it's required and thus can't be None
     let dest_dir    = args.value_of("directory").unwrap();
     {
-        match fs::metadata(dest_dir) {
-            Err(_)   => fail_arg("directory", format_args!("'{}' does not exist or inaccessible", dest_dir)),
-            Ok(meta) => if !meta.is_dir() {
-                fail_arg("directory", format_args!("'{}' is not a directory", dest_dir))
-            }
+        let meta = unresult_or!(fs::metadata(dest_dir) =>
+            || fail_arg("directory", format_args!("'{}' does not exist or inaccessible", dest_dir))
+        );
+        if !meta.is_dir() {
+            fail_arg("directory", format_args!("'{}' is not a directory", dest_dir))
         }
     }
     // Read and validate path to lists file
     // NB: can unwrap because it's required and thus can't be None
     let list_file   = args.value_of("list_file").unwrap();
     {
-        match fs::metadata(list_file) {
-            Err(_)   => fail_arg("list_file", format_args!("'{}' does not exist or inaccessible", list_file)),
-            Ok(meta) => if !meta.is_file() {
+        let meta = unresult_or!(fs::metadata(list_file) =>
+            || fail_arg("list_file", format_args!("'{}' does not exist or inaccessible", list_file))
+        );
+        if !meta.is_file() {
                 fail_arg("list_file", format_args!("'{}' is not a file", list_file))
-            }
         }
     }
     // Read and parse download speed limit
@@ -90,23 +113,27 @@ fn main() {
     // Read and parse number of threads which should be used
     let threads_num = match args.value_of("threads_num") {
         None => 1usize,
-        Some(value) => match usize::from_str(value) {
-            Err(_)  => fail_arg("threads_num", format_args!("'{}' cannot be parsed as unsigned integer", value)),
-            Ok(0)   => fail_arg("threads_num", format_args!("cannot be zero")),
-            Ok(num) => num,
+        Some(value) => {
+            let num = unresult_or!(usize::from_str(value) =>
+                || fail_arg("threads_num", format_args!("'{}' cannot be parsed as unsigned integer", value))
+            );
+            if num == 0 {
+                fail_arg("threads_num", format_args!("cannot be zero"));
+            }
+            num
         }
     };
 
     // Now, we read whole list file and then fill files mapping
-    let all_text = match fs::File::open(list_file) {
-        Err(_) => fail_arg("list_file", format_args!("failed to open")),
-        Ok(mut fd) => {
-            let mut text = String::new();
-            if let Err(_) = fd.read_to_string(&mut text) {
-                fail_arg("list_file", format_args!("failed to read"));
-            }
-            text
-        }
+    let all_text = {
+        let mut fd = unresult_or!(fs::File::open(list_file) =>
+            || fail_arg("list_file", format_args!("failed to open"))
+        );
+        let mut text = String::new();
+        let _ = unresult_or!(fd.read_to_string(&mut text) =>
+            || fail_arg("list_file", format_args!("failed to read"))
+        );
+        text
     };
     let mut files_map: Vec<(&str, &str)> = Vec::new();
     // Next iterate all lines in file and get URLs and file names from them
