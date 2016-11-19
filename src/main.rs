@@ -6,6 +6,7 @@ extern crate env_logger;
 extern crate hyper;
 extern crate thread_scoped;
 
+use std::path::Path;
 use std::process::exit;
 use std::fmt::Arguments;
 use std::fs;
@@ -46,10 +47,31 @@ fn pull_files<'a, I>(thread_num: usize, dest_dir: &'a str, list: &'a Mutex<I>)
     loop {
         // Having this as separate expression should prevent locking for the whole duration
         let (url, dest) = unoption_or!(list.lock().unwrap().next() => break);
-        debug!("#{}: {} -> {}/{}\n", thread_num, url, dest_dir, dest);
-        let response = unresult_or!(hyper::Client::new().get(url).send() =>
+        let dest_path = Path::new(dest_dir).join(dest);
+        debug!("#{}: {} -> {}", thread_num, url, dest_path.display());
+        let mut response = unresult_or!(hyper::Client::new().get(url).send() =>
             |err| {
-                error!("#{}: request {} -> {}/{} failed: {}", thread_num, url, dest_dir, dest, err);
+                error!("#{}: request {} -> {} failed: {}", thread_num, url, dest_path.display(), err);
+                continue;
+            }
+        );
+        if response.status != hyper::status::StatusCode::Ok {
+            let status = response.status;
+            let mut err = String::new();
+            let _ = response.read_to_string(&mut err);
+            error!("#{}: request {} -> {} failed with code {}: {}",
+                thread_num, url, dest_path.display(), status, err
+            );
+        }
+        let mut dest_file = unresult_or!(fs::File::create(&dest_path) =>
+            |err| {
+                error!("#{}: failed to create destination file {}: {}", thread_num, dest_path.display(), err);
+                continue;
+            }
+        );
+        let _ = unresult_or!(io::copy(&mut response, &mut dest_file) =>
+            |err| {
+                error!("#{}: failed download {} -> {}: {}", thread_num, url, dest_path.display(), err);
                 continue;
             }
         );
