@@ -8,6 +8,8 @@ extern crate thread_scoped;
 
 use std::path::Path;
 use std::process::exit;
+use std::result::Result;
+use std::option::Option;
 use std::fmt::Arguments;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -16,26 +18,34 @@ use std::sync::{Mutex};
 
 use thread_scoped::scoped;
 
-macro_rules! unoption_or {
-    ($source:expr => $on_none:expr) => (
-        match $source {
-            Some(val) => val,
-            None => $on_none
-        }
-    )
+trait ResultLike<T, E> {
+    fn to_result(self) -> Result<T, E>;
 }
 
-macro_rules! unresult_or {
-    ($source:expr => || $on_err:expr) => (
-        match $source {
-            Ok(val)  => val,
-            Err(_) => $on_err
+impl<T, E> ResultLike<T, E> for Result<T, E> {
+    fn to_result(self) -> Result<T, E> { self }
+}
+
+impl<T> ResultLike<T, ()> for Option<T> {
+    fn to_result(self) -> Result<T, ()> {
+        match self {
+            Some(value) => Ok(value),
+            None => Err(())
+        }
+    }
+}
+
+macro_rules! try_or {
+    ($source:expr => |$var:ident| $body:expr) => (
+        match ResultLike::to_result($source) {
+            Ok(value) => value,
+            Err($var) => $body
         }
     );
-    ($source:expr => |$var:ident| $on_err:expr) => (
-        match $source {
-            Ok(val)  => val,
-            Err($var) => $on_err
+    ($source:expr => || $body:expr) => (
+        match ResultLike::to_result($source) {
+            Ok(value) => value,
+            Err(_) => $body
         }
     )
 }
@@ -46,10 +56,10 @@ fn pull_files<'a, I>(thread_num: usize, dest_dir: &'a str, list: &'a Mutex<I>)
     info!("worker thread #{} started", thread_num);
     loop {
         // Having this as separate expression should prevent locking for the whole duration
-        let (url, dest) = unoption_or!(list.lock().unwrap().next() => break);
+        let (url, dest) = try_or!(list.lock().unwrap().next() => || break);
         let dest_path = Path::new(dest_dir).join(dest);
-        debug!("#{}: {} -> {}", thread_num, url, dest_path.display());
-        let mut response = unresult_or!(hyper::Client::new().get(url).send() =>
+        println!("Thread #{}: Downloading {} -> {}", thread_num, url, dest_path.display());
+        let mut response = try_or!(hyper::Client::new().get(url).send() =>
             |err| {
                 error!("#{}: request {} -> {} failed: {}", thread_num, url, dest_path.display(), err);
                 continue;
@@ -63,13 +73,13 @@ fn pull_files<'a, I>(thread_num: usize, dest_dir: &'a str, list: &'a Mutex<I>)
                 thread_num, url, dest_path.display(), status, err
             );
         }
-        let mut dest_file = unresult_or!(fs::File::create(&dest_path) =>
+        let mut dest_file = try_or!(fs::File::create(&dest_path) =>
             |err| {
                 error!("#{}: failed to create destination file {}: {}", thread_num, dest_path.display(), err);
                 continue;
             }
         );
-        let _ = unresult_or!(io::copy(&mut response, &mut dest_file) =>
+        let _ = try_or!(io::copy(&mut response, &mut dest_file) =>
             |err| {
                 error!("#{}: failed download {} -> {}: {}", thread_num, url, dest_path.display(), err);
                 continue;
@@ -109,7 +119,7 @@ fn main() {
     // NB: can unwrap because it's required and thus can't be None
     let dest_dir    = args.value_of("directory").unwrap();
     {
-        let meta = unresult_or!(fs::metadata(dest_dir) =>
+        let meta = try_or!(fs::metadata(dest_dir) =>
             || fail_arg("directory", format_args!("'{}' does not exist or inaccessible", dest_dir))
         );
         if !meta.is_dir() {
@@ -120,7 +130,7 @@ fn main() {
     // NB: can unwrap because it's required and thus can't be None
     let list_file   = args.value_of("list_file").unwrap();
     {
-        let meta = unresult_or!(fs::metadata(list_file) =>
+        let meta = try_or!(fs::metadata(list_file) =>
             || fail_arg("list_file", format_args!("'{}' does not exist or inaccessible", list_file))
         );
         if !meta.is_file() {
@@ -136,7 +146,7 @@ fn main() {
     let threads_num = match args.value_of("threads_num") {
         None => 1usize,
         Some(value) => {
-            let num = unresult_or!(usize::from_str(value) =>
+            let num = try_or!(usize::from_str(value) =>
                 || fail_arg("threads_num", format_args!("'{}' cannot be parsed as unsigned integer", value))
             );
             if num == 0 {
@@ -148,11 +158,11 @@ fn main() {
 
     // Now, we read whole list file and then fill files mapping
     let all_text = {
-        let mut fd = unresult_or!(fs::File::open(list_file) =>
+        let mut fd = try_or!(fs::File::open(list_file) =>
             || fail_arg("list_file", format_args!("failed to open"))
         );
         let mut text = String::new();
-        let _ = unresult_or!(fd.read_to_string(&mut text) =>
+        let _ = try_or!(fd.read_to_string(&mut text) =>
             || fail_arg("list_file", format_args!("failed to read"))
         );
         text
