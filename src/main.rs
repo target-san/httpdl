@@ -101,7 +101,7 @@ fn main() {
         let meta = match fs::metadata(list_file) {
             Ok(val) => val,
             Err(_) => fail_arg("list_file", format_args!("'{}' does not exist or inaccessible", list_file))
-        );
+        };
         if !meta.is_file() {
                 fail_arg("list_file", format_args!("'{}' is not a file", list_file))
         }
