@@ -2,10 +2,13 @@
 extern crate clap;
 #[macro_use]
 extern crate log;
+#[macro_use]
+extern crate quick_error;
 extern crate env_logger;
 extern crate hyper;
 extern crate thread_scoped;
 
+use std::error::Error;
 use std::path::Path;
 use std::process::exit;
 use std::fmt::Arguments;
@@ -14,43 +17,55 @@ use std::io::{self, Read, Write};
 use std::str::FromStr;
 use std::sync::{Mutex};
 
+use hyper::status::StatusCode;
+
 use thread_scoped::scoped;
+
+quick_error! {
+    #[derive(Debug)]
+    enum DownloadError {
+        Hyper(error: hyper::Error) {
+            description("HTTP request error")
+            cause(error)
+            display(me) -> ("{}: {}", me.description(), error)
+            from()
+        }
+        Server(status: StatusCode) {
+            description("HTTP request error")
+            display(me) -> ("{}: code {}", me.description(), status)
+        }
+        Io(error: std::io::Error) {
+            description("I/O error")
+            cause(error)
+            display(me) -> ("{}: {}", me.description(), error)
+            from()
+        }
+    }
+}
+
+fn pull_file(src_url: &str, dest_path: &Path) -> Result<(), DownloadError> {
+    let mut response = hyper::Client::new().get(src_url).send()?;
+    if response.status != hyper::status::StatusCode::Ok {
+        return Err(DownloadError::Server(response.status));
+    }
+    let mut dest_file = fs::File::create(&dest_path)?;
+    let _ = io::copy(&mut response, &mut dest_file)?;
+    Ok(())
+}
 
 fn pull_files<'a, I>(thread_num: usize, dest_dir: &'a str, list: &'a Mutex<I>)
     where I: Iterator<Item = (&'a str, &'a str)> + Send
 {
-    info!("worker thread #{} started", thread_num);
+    debug!("worker thread #{} started", thread_num);
     loop {
         // Having this as separate expression should prevent locking for the whole duration
-        let (url, dest) = match list.lock().unwrap().next() {
+        let (url, dest_path) = match list.lock().unwrap().next() {
             None => break,
-            Some(val) => val
+            Some((url, dest)) => (url, Path::new(dest_dir).join(dest)) 
         };
-        let dest_path = Path::new(dest_dir).join(dest);
-        println!("Thread #{}: Downloading {} -> {}", thread_num, url, dest_path.display());
-        let mut response = match hyper::Client::new().get(url).send() {
-            Ok(val) => val,
-            Err(err) => {
-                error!("#{}: request {} -> {} failed: {}", thread_num, url, dest_path.display(), err);
-                continue
-            }
-        };
-        if response.status != hyper::status::StatusCode::Ok {
-            let status = response.status;
-            let mut err = String::new();
-            let _ = response.read_to_string(&mut err);
-            error!("#{}: request {} -> {} failed with code {}: {}", thread_num, url, dest_path.display(), status, err);
-        }
-        let mut dest_file = match fs::File::create(&dest_path) {
-            Ok(val) => val,
-            Err(err) => {
-                error!("#{}: failed to create destination file {}: {}", thread_num, dest_path.display(), err);
-                continue
-            }
-        };
-        if let Err(err) = io::copy(&mut response, &mut dest_file) {
-            error!("#{}: failed download {} -> {}: {}", thread_num, url, dest_path.display(), err);
-            continue;
+        info!("Thread #{}: Downloading {} -> {}", thread_num, url, dest_path.display());
+        if let Err(error) = pull_file(url, &dest_path) {
+            error!("#{} {} -> {} failed: {}", thread_num, url, dest_path.display(), error);
         }
     }
     debug!("worker thread #{} finished", thread_num);

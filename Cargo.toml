@@ -8,6 +8,7 @@ clap            = "*"
 log             = "*"
 env_logger      = "*"
 thread-scoped   = "*"
+quick-error     = "*"
 
 [dependencies.hyper]
 version = "*"
