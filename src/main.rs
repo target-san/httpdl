@@ -57,7 +57,7 @@ fn pull_file(src_url: &str, dest_path: &Path, bucket: &Mutex<TokenBucket>) -> Re
 }
 
 fn copy_limited<R: Read + ?Sized, W: Write + ?Sized>(reader: &mut R, writer: &mut W, bucket: &Mutex<TokenBucket>) -> io::Result<u64> {
-    let mut buf = [0; 8 * 1024];
+    let mut buf = [0; 64 * 1024];
     let mut written = 0;
     loop {
         let limit = bucket.lock().unwrap().take(buf.len());
@@ -77,7 +77,7 @@ fn copy_limited<R: Read + ?Sized, W: Write + ?Sized>(reader: &mut R, writer: &mu
     }
 }
 
-fn pull_files<'a, I>(thread_num: usize, dest_dir: &'a str, bucket: &Mutex<TokenBucket>, list: &'a Mutex<I>)
+fn pull_files<'a, I>(thread_num: usize, dest_dir: &str, bucket: &Mutex<TokenBucket>, list: &Mutex<I>)
     where I: Iterator<Item = (&'a str, &'a str)> + Send
 {
     debug!("worker thread #{} started", thread_num);
@@ -122,11 +122,11 @@ impl TokenBucket {
             return amount;
         }
         // 1. Add to bucket rate / delta
-        let now = Instant::now();
-        let delta = now - self.timestamp;
-        self.timestamp = now;
-        let delta_secs = ((delta.as_secs() as f64) + (delta.subsec_nanos() as f64) / 1_000_000_000f64);
-        let delta_fill = delta_secs * (self.fill_rate as f64);
+        let delta = {
+            let now = Instant::now();
+            now - std::mem::replace(&mut self.timestamp, now)
+        };
+        let delta_fill = ((delta.as_secs() as f64) + (delta.subsec_nanos() as f64) / 1_000_000_000f64) * (self.fill_rate as f64);
         self.remaining = (self.remaining + delta_fill).min(self.capacity as f64);
         // 2. Take as much as possible from bucket, but no more than is present there
         let taken = cmp::min(self.remaining.floor() as usize, amount);
