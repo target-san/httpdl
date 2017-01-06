@@ -79,7 +79,7 @@ struct Args
 {
     dest_dir:    String,
     list_file:   String,
-    threads_num:  usize,
+    threads_num: usize,
     speed_limit: usize,
 }
 
@@ -127,7 +127,23 @@ fn parse_args() -> Args {
         // Read and parse download speed limit
         let speed_limit = match args.value_of("speed_limit") {
             None => 0,
-            Some(_) => return Err(format!("<speed_limit>: not supported for now, sorry").into())
+            Some(value) =>
+                if let Some((index, last_ch)) = value.char_indices().last() {
+                    // Set multiplier based on speed limit suffix
+                    let mult = match last_ch {
+                        'k' | 'K' => 1024,
+                        'm' | 'M' => 1024 * 1024,
+                        _ => 1
+                    };
+                    // Next, get actual number string based on multiplier being recognized or not
+                    let num_str = if mult == 1 { value } else { value.split_at(index).0 };
+                    if let Ok(limit) = usize::from_str(num_str) { limit }
+                    else {
+                        return Err(format!("<speed_limit>: '{}' cannot be parsed as unsigned integer", num_str).into());
+                    }
+                }
+                // fallback, basically means string is empty
+                else { 0 }
         };
 
         Ok(Args {
