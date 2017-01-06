@@ -23,117 +23,6 @@ use hyper::status::StatusCode;
 
 use thread_scoped::scoped;
 
-quick_error! {
-    #[derive(Debug)]
-    enum DownloadError {
-        Hyper(error: hyper::Error) {
-            description("HTTP request error")
-            cause(error)
-            display(me) -> ("{}: {}", me.description(), error)
-            from()
-        }
-        Server(status: StatusCode) {
-            description("HTTP request error")
-            display(me) -> ("{}: code {}", me.description(), status)
-        }
-        Io(error: std::io::Error) {
-            description("I/O error")
-            cause(error)
-            display(me) -> ("{}: {}", me.description(), error)
-            from()
-        }
-    }
-}
-
-fn pull_file(src_url: &str, dest_path: &Path, bucket: &Mutex<TokenBucket>) -> Result<(), DownloadError> {
-    let mut response = hyper::Client::new().get(src_url).send()?;
-    if response.status != hyper::status::StatusCode::Ok {
-        return Err(DownloadError::Server(response.status));
-    }
-    let mut dest_file = fs::File::create(&dest_path)?;
-    let _ = copy_limited(&mut response, &mut dest_file, bucket)?;
-    Ok(())
-}
-
-fn copy_limited<R: Read + ?Sized, W: Write + ?Sized>(reader: &mut R, writer: &mut W, bucket: &Mutex<TokenBucket>) -> io::Result<u64> {
-    let mut buf = [0; 64 * 1024];
-    let mut written = 0;
-    loop {
-        let limit = bucket.lock().unwrap().take(buf.len());
-        if limit == 0 {
-            thread::yield_now();
-            continue;
-        }
-        let mut part = &mut buf[..limit];
-        let len = match reader.read(&mut part) {
-            Ok(0) => return Ok(written),
-            Ok(len) => len,
-            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        };
-        writer.write_all(&mut part[..len])?;
-        written += len as u64;
-    }
-}
-
-fn pull_files<'a, I>(thread_num: usize, dest_dir: &str, bucket: &Mutex<TokenBucket>, list: &Mutex<I>)
-    where I: Iterator<Item = (&'a str, &'a str)> + Send
-{
-    debug!("worker thread #{} started", thread_num);
-    loop {
-        // Having this as separate expression should prevent locking for the whole duration
-        let (url, dest_path) = match list.lock().unwrap().next() {
-            None => break,
-            Some((url, dest)) => (url, Path::new(dest_dir).join(dest)) 
-        };
-        info!("Thread #{}: Downloading {} -> {}", thread_num, url, dest_path.display());
-        if let Err(error) = pull_file(url, &dest_path, bucket) {
-            error!("#{} {} -> {} failed: {}", thread_num, url, dest_path.display(), error);
-        }
-    }
-    debug!("worker thread #{} finished", thread_num);
-}
-
-struct TokenBucket {
-    fill_rate: usize,
-    capacity:  usize,
-    remaining: f64,
-    timestamp: Instant,
-}
-
-impl TokenBucket {
-    fn new(rate: usize) -> TokenBucket {
-        TokenBucket::with_capacity(rate, rate)
-    }
-
-    fn with_capacity(rate: usize, capacity: usize) -> TokenBucket {
-        TokenBucket {
-            fill_rate: rate,
-            capacity:  capacity,
-            remaining: 0f64,
-            timestamp: Instant::now(),
-        }
-    }
-
-    fn take(&mut self, amount: usize) -> usize {
-        // 0. For zero fillrate, treat this bucket as infinite
-        if self.fill_rate == 0 {
-            return amount;
-        }
-        // 1. Add to bucket rate / delta
-        let delta = {
-            let now = Instant::now();
-            now - std::mem::replace(&mut self.timestamp, now)
-        };
-        let delta_fill = ((delta.as_secs() as f64) + (delta.subsec_nanos() as f64) / 1_000_000_000f64) * (self.fill_rate as f64);
-        self.remaining = (self.remaining + delta_fill).min(self.capacity as f64);
-        // 2. Take as much as possible from bucket, but no more than is present there
-        let taken = cmp::min(self.remaining.floor() as usize, amount);
-        self.remaining = (self.remaining - (taken as f64)).max(0f64);
-        return taken;
-    }
-}
-
 fn main() {
     let _ = env_logger::init().unwrap();
 
@@ -255,5 +144,116 @@ fn parse_args() -> Args {
             let _ = writeln!(io::stderr(), "{}\n{}", err, args.usage());
             exit(1);
         }
+    }
+}
+
+struct TokenBucket {
+    fill_rate: usize,
+    capacity:  usize,
+    remaining: f64,
+    timestamp: Instant,
+}
+
+impl TokenBucket {
+    fn new(rate: usize) -> TokenBucket {
+        TokenBucket::with_capacity(rate, rate)
+    }
+
+    fn with_capacity(rate: usize, capacity: usize) -> TokenBucket {
+        TokenBucket {
+            fill_rate: rate,
+            capacity:  capacity,
+            remaining: 0f64,
+            timestamp: Instant::now(),
+        }
+    }
+
+    fn take(&mut self, amount: usize) -> usize {
+        // 0. For zero fillrate, treat this bucket as infinite
+        if self.fill_rate == 0 {
+            return amount;
+        }
+        // 1. Add to bucket rate / delta
+        let delta = {
+            let now = Instant::now();
+            now - std::mem::replace(&mut self.timestamp, now)
+        };
+        let delta_fill = ((delta.as_secs() as f64) + (delta.subsec_nanos() as f64) / 1_000_000_000f64) * (self.fill_rate as f64);
+        self.remaining = (self.remaining + delta_fill).min(self.capacity as f64);
+        // 2. Take as much as possible from bucket, but no more than is present there
+        let taken = cmp::min(self.remaining.floor() as usize, amount);
+        self.remaining = (self.remaining - (taken as f64)).max(0f64);
+        return taken;
+    }
+}
+
+fn pull_files<'a, I>(thread_num: usize, dest_dir: &str, bucket: &Mutex<TokenBucket>, list: &Mutex<I>)
+    where I: Iterator<Item = (&'a str, &'a str)> + Send
+{
+    debug!("worker thread #{} started", thread_num);
+    loop {
+        // Having this as separate expression should prevent locking for the whole duration
+        let (url, dest_path) = match list.lock().unwrap().next() {
+            None => break,
+            Some((url, dest)) => (url, Path::new(dest_dir).join(dest)) 
+        };
+        info!("Thread #{}: Downloading {} -> {}", thread_num, url, dest_path.display());
+        if let Err(error) = pull_file(url, &dest_path, bucket) {
+            error!("#{} {} -> {} failed: {}", thread_num, url, dest_path.display(), error);
+        }
+    }
+    debug!("worker thread #{} finished", thread_num);
+}
+
+quick_error! {
+    #[derive(Debug)]
+    enum DownloadError {
+        Hyper(error: hyper::Error) {
+            description("HTTP request error")
+            cause(error)
+            display(me) -> ("{}: {}", me.description(), error)
+            from()
+        }
+        Server(status: StatusCode) {
+            description("HTTP request error")
+            display(me) -> ("{}: code {}", me.description(), status)
+        }
+        Io(error: std::io::Error) {
+            description("I/O error")
+            cause(error)
+            display(me) -> ("{}: {}", me.description(), error)
+            from()
+        }
+    }
+}
+
+fn pull_file(src_url: &str, dest_path: &Path, bucket: &Mutex<TokenBucket>) -> Result<(), DownloadError> {
+    let mut response = hyper::Client::new().get(src_url).send()?;
+    if response.status != hyper::status::StatusCode::Ok {
+        return Err(DownloadError::Server(response.status));
+    }
+    let mut dest_file = fs::File::create(&dest_path)?;
+    let _ = copy_limited(&mut response, &mut dest_file, bucket)?;
+    Ok(())
+}
+
+fn copy_limited<R: Read + ?Sized, W: Write + ?Sized>(reader: &mut R, writer: &mut W, bucket: &Mutex<TokenBucket>) -> io::Result<u64> {
+    let mut buf = [0; 64 * 1024];
+    let mut written = 0;
+    loop {
+        let limit = bucket.lock().unwrap().take(buf.len());
+        if limit == 0 {
+            thread::yield_now();
+            continue;
+        }
+        let mut part = &mut buf[..limit];
+        let len = match reader.read(&mut part) {
+            Ok(0) => return Ok(written),
+            Ok(len) => len,
+            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        writer.write_all(&mut part[..len])?;
+        written += len as u64;
     }
 }
