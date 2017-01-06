@@ -3,7 +3,7 @@ extern crate clap;
 #[macro_use]
 extern crate log;
 #[macro_use]
-extern crate quick_error;
+extern crate error_chain;
 extern crate env_logger;
 extern crate hyper;
 extern crate thread_scoped;
