@@ -1,15 +1,18 @@
-#[macro_use]
+// First, we declare all external dependencies we need here
+#[macro_use] // Tells compiler to bring macros from that crate into our scope
 extern crate clap;
-#[macro_use]
+#[macro_use] // Has in fact only macros which generate types for us
 extern crate error_chain;
 extern crate hyper;
 extern crate thread_scoped;
-
+// Next, import actual symbols and modules we need
 use std::cmp;
 use std::fs;
+// NB: to use Read and Write traits, we need to bring them into scope explicitly
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::exit;
+// Same as for Read/Write, or we won't be able to do usize::from_str later
 use std::str::FromStr;
 use std::sync::Mutex;
 use std::thread;
@@ -18,62 +21,70 @@ use std::time::Instant;
 use hyper::status::StatusCode;
 
 use thread_scoped::scoped;
-
+// A small helper macro which is like println! but for stderr
 macro_rules! errorln {
     ($($arg:tt)*) => { let _ = writeln!(io::stderr(), $($arg)*); };
 }
-
+// Program starting point, as usual
 fn main() {
     // First, parse arguments
     let Args { dest_dir, list_file, threads_num, speed_limit } = parse_args();
     // Now, we read whole list file and then fill files mapping
     let all_text = {
+        // Open file with list of files to download
         let mut fd = match fs::File::open(&list_file) {
             Ok(val) => val,
             Err(err)  => {
-                errorln!("failed to open {}: {}", list_file, err);
+                errorln!("Failed to open {}: {}", list_file, err);
                 exit(1)
             }
         };
+        // Then read all of its contents into buffer
         let mut text = String::new();
         if let Err(err) = fd.read_to_string(&mut text) {
-            errorln!("failed to read contents of {}: {}", list_file, err);
+            errorln!("Failed to read contents of {}: {}", list_file, err);
             exit(1)
         }
         text
     };
-    let mut files_map: Vec<(&str, &str)> = Vec::new();
-    // Next iterate all lines in file and get URLs and file names from them
-    for line in all_text.lines() {
-        let mut pieces = line.split(|c| " \r\n\t".contains(c)).filter(|s| !s.is_empty());
-        let url = pieces.next();
-        let filename = pieces.next();
-        if let (Some(url_value), Some(fname_value)) = (url, filename) {
-            files_map.push((url_value, fname_value));
-        }
-    }
-    // Finally, when we just need to consume all this in random order,
-    // transform it into consuming iterator and pack under mutex
-    let files_seq = Mutex::new(files_map.into_iter().fuse());
-    // Construct locked token bucket with specified limit
+    // Next, we split the whole file into lines in-place
+    // And for each line which contains proper url-filename tuple,
+    // We yield that tuple
+    let files_seq = all_text
+        .lines()
+        .filter_map(|line| {
+            let mut pieces = line.split(|c| " \r\n\t".contains(c)).filter(|s| !s.is_empty());
+            let url = pieces.next();
+            let filename = pieces.next();
+            if let (Some(url_value), Some(fname_value)) = (url, filename) {
+                Some((url_value, fname_value))
+            }
+            else { None }
+        })
+        .fuse();
+    // To consume this iterator in case of multithreading, we put it under mutex
+    let files_seq = Mutex::new(files_seq);
+    // Also, construct token bucket to control download speed
+    // And put it under mutex likewise
     let bucket = Mutex::new(TokenBucket::new(speed_limit));
-    // Now, create N - 1 worker threads and each will pull files
-    // Looks simpler than fancy tricks like recursive guards
+    // Pool for N-1 worker thread guards 
     let mut worker_guards = Vec::with_capacity(threads_num - 1);
     // Finally, create worker threads
     for i in 1..threads_num {
-        let seq_ref = &files_seq; // thus we can move reference to seq into closure
+        // A minor annoyance - we need to create separate reference variables
+        let seq_ref = &files_seq;
         let bucket_ref = &bucket;
         let dest_dir_ref = &dest_dir;
+        // Create scoped worker thread and put its guard object to vector
         worker_guards.push(
             unsafe { scoped(move || pull_files(i, dest_dir_ref, bucket_ref, seq_ref)) }
         );
     }
     // Main thread would do just the same as worker ones, summing up to N threads
     pull_files(0, &dest_dir, &bucket, &files_seq);
-    // Vector of guards will stop right here
+    // Vector of guards will be dropped right here
 }
-
+// Pre-parsed arguments received from command line
 struct Args
 {
     dest_dir:    String,
@@ -98,10 +109,11 @@ mod parse_args_errors {
         }
     }
 }
-
+// Parse command line arguments
 fn parse_args() -> Args {
+    // Import errors definitions related to parsing arguments
     use parse_args_errors::*;
-    // First, configure our command line
+    // First, configure our command line - use macros from clap crate
     let args = clap_app!(httpdl =>
         (version: crate_version!())
         (author:  crate_authors!())
@@ -119,7 +131,9 @@ fn parse_args() -> Args {
             "Download files using N threads"
         )
     ).get_matches();
-
+    // Next, perform additional parsing of arguments
+    // And report any errors which can happen
+    // We use several functions to have proper errors nesting
     return match process_args(&args) {
         Ok(value) => value,
         Err(err)  => {
@@ -131,7 +145,7 @@ fn parse_args() -> Args {
             exit(1);
         }
     };
-
+    // Simply construct Args and return any error if one occurs
     fn process_args(args: &clap::ArgMatches) -> Result<Args> {
         Ok(Args {
             dest_dir:    arg_parse(args, "dest_dir",    arg_dest_dir)?,
@@ -140,13 +154,15 @@ fn parse_args() -> Args {
             speed_limit: arg_parse(args, "speed_limit", arg_speed_limit)?,
         })
     }
-
+    // Small helper func which forwards any errors during parsing of specific
+    // argument and appends proper context info
     fn arg_parse<T, F>(args: &clap::ArgMatches, name: &str, func: F) -> Result<T>
         where F: FnOnce(Option<&str>) -> Result<T>
     {
+        // Simply invoke argument parser and wrap any Err passing by with chain_err
         func(args.value_of(name)).chain_err(|| ErrorKind::ArgError(name.to_owned()))
     }
-
+    // Check that destination path is a directory and exists
     fn arg_dest_dir(arg: Option<&str>) -> Result<String> {
         match arg {
             None => bail!("missing argument"),
@@ -155,7 +171,7 @@ fn parse_args() -> Args {
                 else { bail!("{}: not a directory", s) }
         }
     }
-
+    // Check that surces list exists and is a file
     fn arg_list_file(arg: Option<&str>) -> Result<String> {
         match arg {
             None => bail!("missing argument"),
@@ -164,7 +180,7 @@ fn parse_args() -> Args {
                 else { bail!("{}: not a file", s) }
         }
     }
-
+    // Get number of threads as number greater than 0, default 1
     fn arg_threads_num(arg: Option<&str>) -> Result<usize> {
         match arg {
             None => Ok(1),
@@ -174,7 +190,7 @@ fn parse_args() -> Args {
             }
         }
     }
-
+    // Get speed limit as a number with some custom prefixes
     fn arg_speed_limit(arg: Option<&str>) -> Result<usize> {
         match arg {
             None => Ok(0),
@@ -189,7 +205,9 @@ fn parse_args() -> Args {
                     };
                     // Next, get actual number string based on multiplier being recognized or not
                     let num_str = if mult == 1 { s } else { s.split_at(last_index).0 };
-                    usize::from_str(num_str).map(|n| n * mult).map_err(|e| e.into())
+                    // We could map error, but it's also possible to use '?'
+                    // and simply return result wrapped into Ok 
+                    Ok(usize::from_str(num_str).map(|n| n * mult)?)
                 }
             }
         }
