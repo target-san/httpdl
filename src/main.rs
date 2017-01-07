@@ -9,7 +9,6 @@ extern crate hyper;
 extern crate thread_scoped;
 
 use std::cmp;
-use std::error::Error;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -83,13 +82,31 @@ struct Args
     speed_limit: usize,
 }
 
+mod parse_args_errors {
+    error_chain! {
+        types {}
+        links {}
+        foreign_links {
+            Io(::std::io::Error);
+            ParseInt(::std::num::ParseIntError);
+        }
+        errors {
+            ArgError(arg: String) {
+                description("Error parsing command line argument")
+                display("Error parsing command line argument <{}>", arg)
+            }
+        }
+    }
+}
+
 fn parse_args() -> Args {
+    use parse_args_errors::*;
     // First, configure our command line
     let args = clap_app!(httpdl =>
         (version: crate_version!())
         (author:  crate_authors!())
         (about: "Downloads files via HTTP")
-        (@arg directory:   -o +required +takes_value
+        (@arg dest_dir:   -o +required +takes_value
             "Directory where to place downloaded files"
         )
         (@arg list_file:   -f +required +takes_value
@@ -103,62 +120,78 @@ fn parse_args() -> Args {
         )
     ).get_matches();
 
-    let process_args = |args: &clap::ArgMatches| -> Result<Args, Box<Error>>{
-        // Destination directory
-        let dest_dir = args.value_of("directory").unwrap();
-        if ! fs::metadata(dest_dir)?.is_dir() {
-            return Err(format!("<directory>: '{}' is not a directory", dest_dir).into());
-        }
-        // Source list file
-        let list_file = args.value_of("list_file").unwrap();
-        if ! fs::metadata(list_file)?.is_file() {
-            return Err(format!("<list_file>: '{}' is not a file", dest_dir).into());
-        }
-        // Number of threads
-        let threads_num = match args.value_of("threads_num") {
-            None => 1usize,
-            Some(value) => match usize::from_str(value) {
-                Err(_)      => return Err(format!("<threads_num>: '{}' cannot be parsed as unsigned integer", value).into()),
-                Ok(0usize)  => return Err(format!("<threads_num>: cannot be zero").into()),
-                Ok(num)     => num 
+    return match process_args(&args) {
+        Ok(value) => value,
+        Err(err)  => {
+            let _ = writeln!(io::stderr(), "Error: {}", err);
+            for e in err.iter().skip(1) {
+                let _ = writeln!(io::stderr(), "  Caused by: {}", e);
             }
-        };
+            let _ = writeln!(io::stderr(), "{}", args.usage());
+            exit(1);
+        }
+    };
 
-        // Read and parse download speed limit
-        let speed_limit = match args.value_of("speed_limit") {
-            None => 0,
-            Some(value) =>
-                if let Some((index, last_ch)) = value.char_indices().last() {
+    fn process_args(args: &clap::ArgMatches) -> Result<Args> {
+        Ok(Args {
+            dest_dir:    arg_parse(args, "dest_dir",    arg_dest_dir)?,
+            list_file:   arg_parse(args, "list_file",   arg_list_file)?,
+            threads_num: arg_parse(args, "threads_num", arg_threads_num)?,
+            speed_limit: arg_parse(args, "speed_limit", arg_speed_limit)?,
+        })
+    }
+
+    fn arg_parse<T, F>(args: &clap::ArgMatches, name: &str, func: F) -> Result<T>
+        where F: FnOnce(Option<&str>) -> Result<T>
+    {
+        func(args.value_of(name)).chain_err(|| ErrorKind::ArgError(name.to_owned()))
+    }
+
+    fn arg_dest_dir(arg: Option<&str>) -> Result<String> {
+        match arg {
+            None => bail!("missing argument"),
+            Some(s) =>
+                if fs::metadata(s)?.is_dir() { Ok(s.to_owned()) }
+                else { bail!("{}: not a directory", s) }
+        }
+    }
+
+    fn arg_list_file(arg: Option<&str>) -> Result<String> {
+        match arg {
+            None => bail!("missing argument"),
+            Some(s) => 
+                if fs::metadata(s)?.is_file() { Ok(s.to_owned()) }
+                else { bail!("{}: not a file", s) }
+        }
+    }
+
+    fn arg_threads_num(arg: Option<&str>) -> Result<usize> {
+        match arg {
+            None => Ok(1),
+            Some(s) => match usize::from_str(s)? {
+                0 => bail!("cannot be zero"),
+                n => Ok(n)
+            }
+        }
+    }
+
+    fn arg_speed_limit(arg: Option<&str>) -> Result<usize> {
+        match arg {
+            None => Ok(0),
+            Some(s) => match s.char_indices().last() {
+                None => Ok(0),
+                Some((last_index, last_char)) => {
                     // Set multiplier based on speed limit suffix
-                    let mult = match last_ch {
+                    let mult: usize = match last_char {
                         'k' | 'K' => 1024,
                         'm' | 'M' => 1024 * 1024,
                         _ => 1
                     };
                     // Next, get actual number string based on multiplier being recognized or not
-                    let num_str = if mult == 1 { value } else { value.split_at(index).0 };
-                    if let Ok(limit) = usize::from_str(num_str) { limit }
-                    else {
-                        return Err(format!("<speed_limit>: '{}' cannot be parsed as unsigned integer", num_str).into());
-                    }
+                    let num_str = if mult == 1 { s } else { s.split_at(last_index).0 };
+                    usize::from_str(num_str).map(|n| n * mult).map_err(|e| e.into())
                 }
-                // fallback, basically means string is empty
-                else { 0 }
-        };
-
-        Ok(Args {
-            dest_dir:    dest_dir.into(),
-            list_file:   list_file.into(),
-            threads_num: threads_num,
-            speed_limit: speed_limit,
-        })
-    };
-
-    match process_args(&args) {
-        Ok(value) => value,
-        Err(err)  => {
-            let _ = writeln!(io::stderr(), "{}\n{}", err, args.usage());
-            exit(1);
+            }
         }
     }
 }
