@@ -1,10 +1,7 @@
 #[macro_use]
 extern crate clap;
 #[macro_use]
-extern crate log;
-#[macro_use]
 extern crate error_chain;
-extern crate env_logger;
 extern crate hyper;
 extern crate thread_scoped;
 
@@ -22,22 +19,25 @@ use hyper::status::StatusCode;
 
 use thread_scoped::scoped;
 
-fn main() {
-    let _ = env_logger::init().unwrap();
+macro_rules! errorln {
+    ($($arg:tt)*) => { let _ = writeln!(io::stderr(), $($arg)*); };
+}
 
+fn main() {
+    // First, parse arguments
     let Args { dest_dir, list_file, threads_num, speed_limit } = parse_args();
     // Now, we read whole list file and then fill files mapping
     let all_text = {
         let mut fd = match fs::File::open(&list_file) {
             Ok(val) => val,
             Err(err)  => {
-                let _ = writeln!(io::stderr(), "failed to open {}: {}", list_file, err);
+                errorln!("failed to open {}: {}", list_file, err);
                 exit(1)
             }
         };
         let mut text = String::new();
         if let Err(err) = fd.read_to_string(&mut text) {
-            let _ = writeln!(io::stderr(), "failed to read contents of {}: {}", list_file, err);
+            errorln!("failed to read contents of {}: {}", list_file, err);
             exit(1)
         }
         text
@@ -123,11 +123,11 @@ fn parse_args() -> Args {
     return match process_args(&args) {
         Ok(value) => value,
         Err(err)  => {
-            let _ = writeln!(io::stderr(), "Error: {}", err);
+            errorln!("Error: {}", err);
             for e in err.iter().skip(1) {
-                let _ = writeln!(io::stderr(), "  Caused by: {}", e);
+                errorln!("  Caused by: {}", e);
             }
-            let _ = writeln!(io::stderr(), "{}", args.usage());
+            errorln!("{}", args.usage());
             exit(1);
         }
     };
@@ -239,19 +239,17 @@ impl TokenBucket {
 fn pull_files<'a, I>(thread_num: usize, dest_dir: &str, bucket: &Mutex<TokenBucket>, list: &Mutex<I>)
     where I: Iterator<Item = (&'a str, &'a str)> + Send
 {
-    debug!("worker thread #{} started", thread_num);
     loop {
         // Having this as separate expression should prevent locking for the whole duration
         let (url, dest_path) = match list.lock().unwrap().next() {
             None => break,
             Some((url, dest)) => (url, Path::new(dest_dir).join(dest)) 
         };
-        info!("Thread #{}: Downloading {} -> {}", thread_num, url, dest_path.display());
+        println!("#{}: Downloading {} -> {}", thread_num, url, dest_path.display());
         if let Err(error) = pull_file(url, &dest_path, bucket) {
-            error!("#{} {} -> {} failed: {}", thread_num, url, dest_path.display(), error);
+            errorln!("#{}: Failed {} -> {} due to: {}", thread_num, url, dest_path.display(), error);
         }
     }
-    debug!("worker thread #{} finished", thread_num);
 }
 
 quick_error! {
