@@ -1,6 +1,7 @@
 // First, we declare all external dependencies we need here
 #[macro_use] // Tells compiler to bring macros from that crate into our scope
-extern crate clap;
+extern crate rustc_decodable;
+extern crate docopt;
 #[macro_use] // Has in fact only macros which generate types for us
 extern crate error_chain;
 extern crate hyper;
@@ -21,6 +22,36 @@ use std::time::Instant;
 use hyper::status::StatusCode;
 
 use thread_scoped::scoped;
+// Let's write a comprehensive USAGE
+const USAGE: &'static str = "
+HTTP Downloader
+Simplistic console file downloader with multithreading and speed limiting
+Pulls data from HTTP only
+
+Usage:
+    httpdl -f=<list_file> -o=<dest_dir> [-n=<threads_num>] [-l=<speed_limit>]
+    httpdl --help
+
+Options:
+    -f=<list_file>      File which contains list of URLs and respective local file names
+    -o=<dest_dir>       Destination directory where all the files from <list_file> will be
+                        downloaded to
+    -n=<threads_num>    Number of threads to utilize
+                        [default: 1]
+    -l=<speed_limit>    Limit total download speed; suffixes supported:
+                        k, K - number of kilobytes (1024) per second
+                        m, M - number of megabytes (1024*1024) per second
+                        [default: 0] - no speed limit
+";
+
+#[derive(RustcDecodable)]
+struct DocoptArgs {
+    arg_dest_dir:       String,
+    arg_list_file:      String,
+    arg_threads_num:    usize,
+    arg_speed_limit:    String,
+}
+
 // A small helper macro which is like println! but for stderr
 macro_rules! errorln {
     ($($arg:tt)*) => { let _ = writeln!(io::stderr(), $($arg)*); };
@@ -146,7 +177,7 @@ fn parse_args() -> Args {
         }
     };
     // Simply construct Args and return any error if one occurs
-    fn process_args(args: &clap::ArgMatches) -> Result<Args> {
+    fn process_args() -> Result<Args> {
         Ok(Args {
             dest_dir:    arg_parse(args, "dest_dir",    arg_dest_dir)?,
             list_file:   arg_parse(args, "list_file",   arg_list_file)?,

@@ -4,7 +4,8 @@ version = "0.2.0"
 authors = ["Igor Baidiuk <target.san@gmail.com>"]
 
 [dependencies]
-clap            = "2.18.0"
+docopt          = "0.7.0"
+rustc-serialize = "0.3.22"
 thread-scoped   = "1.0.1"
 error-chain     = "0.7.2"
 
