@@ -119,20 +119,28 @@ fn parse_args() -> Args {
     // NB: app_from_crate macro simply sets several useful defaults
     let args = app_from_crate!()
         .arg(Arg::with_name("dest_dir")
+            .help("Destination dir where to store downloaded files")
             .short("o")
             .required(true)
             .takes_value(true)
         )
         .arg(Arg::with_name("list_file")
+            .help("File which contains list of URLs to download and local names for files")
             .short("f")
             .required(true)
             .takes_value(true)
         )
         .arg(Arg::with_name("threads_num")
+            .help("Number of worker threads to use")
             .short("n")
             .default_value("1")
         )
         .arg(Arg::with_name("speed_limit")
+            .help("Global speed limit, in bytes per second. 0 means no limit.
+Suffixes supported:
+    k, K - kilobytes, i.e. 1024's of bytes
+    m, M - megabytes, i.e. 1024*1024's of bytes
+")
             .short("l")
             .default_value("0")
         )
@@ -267,7 +275,7 @@ fn pull_files<'a, I>(thread_num: usize, dest_dir: &str, bucket: &Mutex<TokenBuck
         };
         println!("#{}: Downloading {} -> {}", thread_num, url, dest_path.display());
         if let Err(error) = pull_file(url, &dest_path, bucket) {
-            errorln!("#{}: Failed {} -> {} due to: {}", thread_num, url, dest_path.display(), error);
+            errorln!("#{}: Failed {} -> {} due to:\n    {}", thread_num, url, dest_path.display(), error);
         }
     }
 }
