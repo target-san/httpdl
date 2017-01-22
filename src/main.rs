@@ -1,7 +1,6 @@
 // First, we declare all external dependencies we need here
-#[macro_use] // Tells compiler to bring macros from that crate into our scope
-extern crate rustc_decodable;
-extern crate docopt;
+#[macro_use]
+extern crate clap;
 #[macro_use] // Has in fact only macros which generate types for us
 extern crate error_chain;
 extern crate hyper;
@@ -22,35 +21,6 @@ use std::time::Instant;
 use hyper::status::StatusCode;
 
 use thread_scoped::scoped;
-// Let's write a comprehensive USAGE
-const USAGE: &'static str = "
-HTTP Downloader
-Simplistic console file downloader with multithreading and speed limiting
-Pulls data from HTTP only
-
-Usage:
-    httpdl -f=<list_file> -o=<dest_dir> [-n=<threads_num>] [-l=<speed_limit>]
-    httpdl --help
-
-Options:
-    -f=<list_file>      File which contains list of URLs and respective local file names
-    -o=<dest_dir>       Destination directory where all the files from <list_file> will be
-                        downloaded to
-    -n=<threads_num>    Number of threads to utilize
-                        [default: 1]
-    -l=<speed_limit>    Limit total download speed; suffixes supported:
-                        k, K - number of kilobytes (1024) per second
-                        m, M - number of megabytes (1024*1024) per second
-                        [default: 0] - no speed limit
-";
-
-#[derive(RustcDecodable)]
-struct DocoptArgs {
-    arg_dest_dir:       String,
-    arg_list_file:      String,
-    arg_threads_num:    usize,
-    arg_speed_limit:    String,
-}
 
 // A small helper macro which is like println! but for stderr
 macro_rules! errorln {
@@ -143,25 +113,30 @@ mod parse_args_errors {
 // Parse command line arguments
 fn parse_args() -> Args {
     // Import errors definitions related to parsing arguments
+    use clap::Arg;
     use parse_args_errors::*;
-    // First, configure our command line - use macros from clap crate
-    let args = clap_app!(httpdl =>
-        (version: crate_version!())
-        (author:  crate_authors!())
-        (about: "Downloads files via HTTP")
-        (@arg dest_dir:   -o +required +takes_value
-            "Directory where to place downloaded files"
+    // Define command line parser
+    // NB: app_from_crate macro simply sets several useful defaults
+    let args = app_from_crate!()
+        .arg(Arg::with_name("dest_dir")
+            .short("o")
+            .required(true)
+            .takes_value(true)
         )
-        (@arg list_file:   -f +required +takes_value
-            "File which contains list of URLs to download and the local file names to use"
+        .arg(Arg::with_name("list_file")
+            .short("f")
+            .required(true)
+            .takes_value(true)
         )
-        (@arg speed_limit: -l +takes_value
-            "Limit download speed to specified value, in bytes; suffixes like 'k' (kilobytes) and 'm' (megabytes)"
+        .arg(Arg::with_name("threads_num")
+            .short("n")
+            .default_value("1")
         )
-        (@arg threads_num: -n +takes_value
-            "Download files using N threads"
+        .arg(Arg::with_name("speed_limit")
+            .short("l")
+            .default_value("0")
         )
-    ).get_matches();
+        .get_matches();
     // Next, perform additional parsing of arguments
     // And report any errors which can happen
     // We use several functions to have proper errors nesting
@@ -177,7 +152,7 @@ fn parse_args() -> Args {
         }
     };
     // Simply construct Args and return any error if one occurs
-    fn process_args() -> Result<Args> {
+    fn process_args(args: &clap::ArgMatches) -> Result<Args> {
         Ok(Args {
             dest_dir:    arg_parse(args, "dest_dir",    arg_dest_dir)?,
             list_file:   arg_parse(args, "list_file",   arg_list_file)?,
@@ -187,59 +162,55 @@ fn parse_args() -> Args {
     }
     // Small helper func which forwards any errors during parsing of specific
     // argument and appends proper context info
+    // Argument value is unwrapped from Option, since our arguments are either required
+    // or have default value
     fn arg_parse<T, F>(args: &clap::ArgMatches, name: &str, func: F) -> Result<T>
-        where F: FnOnce(Option<&str>) -> Result<T>
+        where F: FnOnce(&str) -> Result<T>
     {
         // Simply invoke argument parser and wrap any Err passing by with chain_err
-        func(args.value_of(name)).chain_err(|| ErrorKind::ArgError(name.to_owned()))
+        func(args.value_of(name).unwrap()).chain_err(|| ErrorKind::ArgError(name.to_owned()))
     }
     // Check that destination path is a directory and exists
-    fn arg_dest_dir(arg: Option<&str>) -> Result<String> {
-        match arg {
-            None => bail!("missing argument"),
-            Some(s) =>
-                if fs::metadata(s)?.is_dir() { Ok(s.to_owned()) }
-                else { bail!("{}: not a directory", s) }
+    fn arg_dest_dir(arg: &str) -> Result<String> {
+        if fs::metadata(arg)?.is_dir() {
+            Ok(arg.to_owned())
+        }
+        else {
+            bail!("{}: not a directory", arg)
         }
     }
     // Check that surces list exists and is a file
-    fn arg_list_file(arg: Option<&str>) -> Result<String> {
-        match arg {
-            None => bail!("missing argument"),
-            Some(s) => 
-                if fs::metadata(s)?.is_file() { Ok(s.to_owned()) }
-                else { bail!("{}: not a file", s) }
+    fn arg_list_file(arg: &str) -> Result<String> {
+        if fs::metadata(arg)?.is_file() {
+            Ok(arg.to_owned())
+        }
+        else {
+            bail!("{}: not a file", arg)
         }
     }
     // Get number of threads as number greater than 0, default 1
-    fn arg_threads_num(arg: Option<&str>) -> Result<usize> {
-        match arg {
-            None => Ok(1),
-            Some(s) => match usize::from_str(s)? {
-                0 => bail!("cannot be zero"),
-                n => Ok(n)
-            }
+    fn arg_threads_num(arg: &str) -> Result<usize> {
+        match usize::from_str(arg)? {
+            0 => bail!("cannot be zero"),
+            n => Ok(n)
         }
     }
     // Get speed limit as a number with some custom prefixes
-    fn arg_speed_limit(arg: Option<&str>) -> Result<usize> {
-        match arg {
+    fn arg_speed_limit(arg: &str) -> Result<usize> {
+        match arg.char_indices().last() {
             None => Ok(0),
-            Some(s) => match s.char_indices().last() {
-                None => Ok(0),
-                Some((last_index, last_char)) => {
-                    // Set multiplier based on speed limit suffix
-                    let mult: usize = match last_char {
-                        'k' | 'K' => 1024,
-                        'm' | 'M' => 1024 * 1024,
-                        _ => 1
-                    };
-                    // Next, get actual number string based on multiplier being recognized or not
-                    let num_str = if mult == 1 { s } else { s.split_at(last_index).0 };
-                    // We could map error, but it's also possible to use '?'
-                    // and simply return result wrapped into Ok 
-                    Ok(usize::from_str(num_str).map(|n| n * mult)?)
-                }
+            Some((last_index, last_char)) => {
+                // Set multiplier based on speed limit suffix
+                let mult: usize = match last_char {
+                    'k' | 'K' => 1024,
+                    'm' | 'M' => 1024 * 1024,
+                    _ => 1
+                };
+                // Next, get actual number string based on multiplier being recognized or not
+                let num_str = if mult == 1 { arg } else { arg.split_at(last_index).0 };
+                // We could map error, but it's also possible to use '?'
+                // and simply return result wrapped into Ok 
+                Ok(usize::from_str(num_str).map(|n| n * mult)?)
             }
         }
     }
