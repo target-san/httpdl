@@ -7,13 +7,5 @@ description = "A simple HTTP file downloader. Supports specifying number of thre
 [dependencies]
 clap            = "2.20.0"
 thread-scoped   = "1.0.1"
-
-[dependencies.hyper]
-version = "0.9.12"
-default-features = false
-features = []
-
-[dependencies.error-chain]
-version = "0.7.2"
-default-features = false
-features = []
+error-chain     = "0.7.2"
+hyper           = "0.10.0"
