@@ -1,0 +1,5 @@
+[package]
+name        = "httpdl"
+version     = "0.1.0"
+authors     = ["Igor Baidiuk <ibaidiuk@amcbridge.com>"]
+description = "Console HTTP file downloader, with support of multithreading and speed limiting"
