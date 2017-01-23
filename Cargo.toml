@@ -5,4 +5,5 @@ authors     = ["Igor Baidiuk <ibaidiuk@amcbridge.com>"]
 description = "Console HTTP file downloader, with support of multithreading and speed limiting"
 
 [dependencies]
-clap = "2.20.0"
+clap        = "2.20.0"
+hyper       = "0.10.0"

@@ -1,10 +1,17 @@
-#[macro_use]            // Attribute, means we're importing macros from this crate
-extern crate clap;      // Declare external crate dependency
+#[macro_use]                // Attribute, means we're importing macros from this crate
+extern crate clap;          // Declare external crate dependency
+extern crate hyper;
 // Import symbols from STDLIB or other crates
-use std::str::FromStr;  // Describes any type which can be read from string slice
-use std::fmt::Debug;    // Debug types can be dumped as text, for debug purposes
-use std::fs;            // Filesystem stuff
-use std::io::Read;      // We need this to invoke methods of Read trait
+use std::str::FromStr;      // Describes any type which can be read from string slice
+use std::fmt::Debug;        // Debug types can be dumped as text, for debug purposes
+use std::fs;                // Filesystem stuff
+use std::io::{self, Read, Write};  // We need this to invoke methods of Read trait
+use std::path::Path;        // FS paths manipulation
+
+use hyper::Client;
+use hyper::status::StatusCode;
+
+
 // Main entry point
 fn main() {
     // Parse arguments 
@@ -31,9 +38,21 @@ fn main() {
             else { None } // Otherwise, signal that there's no pair for this particular line
         })
         .fuse();
-    // Just for our convenience, 
-    for item in urls_list {
-        println!("{:?}", item);
+    // Iterate list of download targets
+    for (url, filename) in urls_list {
+        // Small info message, just for our convenience
+        println!("Downloading: {} -> {}", url, filename);
+        // Fire request to HTTP server via Hyper, obtain response
+        let mut response = Client::new().get(url).send().unwrap();
+        // Check status, barf if it's not okay and skip downloading
+        if response.status != StatusCode::Ok {
+            let _ = writeln!(io::stderr(), "    HTTP request failed: {}", response.status);
+            continue;
+        }
+        // Lastly, create target file
+        let mut file = fs::File::create(Path::new(&args.dest_dir).join(filename)).unwrap();
+        // And copy all the stuff there form response
+        let _ = io::copy(&mut response, &mut file).unwrap();
     }
 }
 // Contains parsed arguments
