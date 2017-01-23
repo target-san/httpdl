@@ -66,6 +66,10 @@ struct Args {
 mod parse_args_errors {
     // Let's describe our errors
     error_chain! {
+        foreign_links {
+            Io(::std::io::Error);
+            ParseInt(::std::num::ParseIntError);
+        }
     }
 }
 // Parse arguments from command line; any errors handled internally
@@ -102,7 +106,7 @@ Suffixes supported:
         )
         .get_matches(); // Will either return arguments map or interrupt program with descriptive error
 
-    match parse_args_inner(&args) {
+    return match parse_args_inner(&args) {
         Ok(args) => args,
         Err(error) => {
             let _ = writeln!(io::stderr(), "Error: {}", error);
@@ -111,8 +115,8 @@ Suffixes supported:
             }
             let _ = writeln!(io::stderr(), "{}", args.usage());
             exit(1)
-        },
-    }
+        }
+    };
     
     fn parse_args_inner(args: &clap::ArgMatches) -> Result<Args> {
         // Simply return Args structure, with all arguments parsef
@@ -170,7 +174,7 @@ Suffixes supported:
                 };
                 // We'll parse number without suffix
                 let number = if multiplier == 1 { value } else { &value[..last_index] };
-                Ok(number.parse()? * multiplier)
+                Ok(number.parse::<usize>()? * multiplier)
             }
         }
     }
