@@ -7,3 +7,4 @@ description = "Console HTTP file downloader, with support of multithreading and 
 [dependencies]
 clap        = "2.20.0"
 hyper       = "0.10.0"
+error-chain = "0.8.1"

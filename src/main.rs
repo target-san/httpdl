@@ -1,10 +1,13 @@
 #[macro_use]                // Attribute, means we're importing macros from this crate
 extern crate clap;          // Declare external crate dependency
 extern crate hyper;
+#[macro_use]
+extern crate error_chain;
 // Import symbols from STDLIB or other crates
 use std::fs;                // Filesystem stuff
 use std::io::{self, Read, Write};  // We need this to invoke methods of Read trait
 use std::path::Path;        // FS paths manipulation
+use std::process::exit;
 
 use hyper::Client;
 use hyper::status::StatusCode;
@@ -53,16 +56,22 @@ fn main() {
     }
 }
 // Contains parsed arguments
-#[derive(Debug)]
 struct Args {
     dest_dir: String,
     list_file: String,
     threads_num: usize,
     speed_limit: usize,
 }
+// Inline nested module
+mod parse_args_errors {
+    // Let's describe our errors
+    error_chain! {
+    }
+}
 // Parse arguments from command line; any errors handled internally
 fn parse_args() -> Args {
     use clap::Arg;  // We can import external symbols at any scope
+    use parse_args_errors::*;
     // Here, we define argument parser
     let args = app_from_crate!()
         .arg(Arg::with_name("dest_dir")
@@ -92,42 +101,67 @@ Suffixes supported:
             .default_value("0")
         )
         .get_matches(); // Will either return arguments map or interrupt program with descriptive error
-    // Simply return Args structure, with all arguments parsef
-    return Args {
-        dest_dir:    parse_arg(&args, "dest_dir",    parse_dir),
-        list_file:   parse_arg(&args, "list_file",   parse_file),
-        threads_num: parse_arg(&args, "threads_num", parse_threads_num),
-        speed_limit: parse_arg(&args, "speed_limit", parse_speed_limit),
-    };
+
+    match parse_args_inner(&args) {
+        Ok(args) => args,
+        Err(error) => {
+            let _ = writeln!(io::stderr(), "Error: {}", error);
+            for inner in error.iter().skip(1) {
+                let _ = writeln!(io::stderr(), "  Caused by: {}", inner);
+            }
+            let _ = writeln!(io::stderr(), "{}", args.usage());
+            exit(1)
+        },
+    }
+    
+    fn parse_args_inner(args: &clap::ArgMatches) -> Result<Args> {
+        // Simply return Args structure, with all arguments parsef
+        Ok(Args {
+            dest_dir:    parse_arg(&args, "dest_dir",    parse_dir)?,
+            list_file:   parse_arg(&args, "list_file",   parse_file)?,
+            threads_num: parse_arg(&args, "threads_num", parse_threads_num)?,
+            speed_limit: parse_arg(&args, "speed_limit", parse_speed_limit)?,
+        })
+    }
     // Tiny helper function which takes argument value from matches and parses it into actual value
-    fn parse_arg<T, F: FnOnce(&str) -> T>(args: &clap::ArgMatches, name: &str, parse: F) -> T
+    fn parse_arg<T, F>(args: &clap::ArgMatches, name: &str, parse: F) -> Result<T>
+        where F: FnOnce(&str) -> Result<T>
     {
         // Take value of argument by name, then unwrap it from option and parse using external function
-        parse(args.value_of(name).unwrap())
+        parse(args.value_of(name).unwrap()).chain_err(|| format!("Invalid program argument <{}>", name))
     }
     // Check that specified string represents existing directory
-    fn parse_dir(value: &str) -> String {
-        assert!(fs::metadata(value).unwrap().is_dir());
-        value.to_owned() // Simply converts string to owned form
+    fn parse_dir(value: &str) -> Result<String> {
+        if fs::metadata(value)?.is_dir() {
+            Ok(value.to_owned())
+        }
+        else {
+            bail!("{}: not a directory", value)
+        }
     }
     // Check that string is a path to existing file
-    fn parse_file(value: &str) -> String {
-        assert!(fs::metadata(value).unwrap().is_file());
-        value.to_owned()
+    fn parse_file(value: &str) -> Result<String> {
+        if fs::metadata(value)?.is_file() {
+            Ok(value.to_owned())
+        }
+        else {
+            bail!("{}: not a file", value)
+        }
     }
     // Number of threads, usize, 1 or more
-    fn parse_threads_num(value: &str) -> usize {
-        let value = value.parse().unwrap();
-        assert!(value > 0);
-        value
+    fn parse_threads_num(value: &str) -> Result<usize> {
+        match value.parse()? {
+            0 => bail!("cannot be zero"),
+            n => Ok(n)
+        }
     }
     // Speed limit, taking suffixes into account
-    fn parse_speed_limit(value: &str) -> usize {
+    fn parse_speed_limit(value: &str) -> Result<usize> {
         // char_indices will iterate string slice as a sequence of pairs,
         // where first element is the byte offset of character, and the second is a Unicode character
         // last() will return last iterator in sequence
         match value.char_indices().last() {
-            None => 0, // Means string is empty, treat as 0
+            None => Ok(0), // Means string is empty, treat as 0
             Some((last_index, last_char)) => {
                 let multiplier: usize = match last_char {
                     'k' | 'K' => 1024,
@@ -136,7 +170,7 @@ Suffixes supported:
                 };
                 // We'll parse number without suffix
                 let number = if multiplier == 1 { value } else { &value[..last_index] };
-                number.parse().unwrap()
+                Ok(number.parse()? * multiplier)
             }
         }
     }
