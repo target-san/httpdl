@@ -2,15 +2,12 @@
 extern crate clap;          // Declare external crate dependency
 extern crate hyper;
 // Import symbols from STDLIB or other crates
-use std::str::FromStr;      // Describes any type which can be read from string slice
-use std::fmt::Debug;        // Debug types can be dumped as text, for debug purposes
 use std::fs;                // Filesystem stuff
 use std::io::{self, Read, Write};  // We need this to invoke methods of Read trait
 use std::path::Path;        // FS paths manipulation
 
 use hyper::Client;
 use hyper::status::StatusCode;
-
 
 // Main entry point
 fn main() {
@@ -97,16 +94,50 @@ Suffixes supported:
         .get_matches(); // Will either return arguments map or interrupt program with descriptive error
     // Simply return Args structure, with all arguments parsef
     return Args {
-        dest_dir:    parse_arg(&args, "dest_dir"),
-        list_file:   parse_arg(&args, "list_file"),
-        threads_num: parse_arg(&args, "threads_num"),
-        speed_limit: parse_arg(&args, "speed_limit"),
+        dest_dir:    parse_arg(&args, "dest_dir",    parse_dir),
+        list_file:   parse_arg(&args, "list_file",   parse_file),
+        threads_num: parse_arg(&args, "threads_num", parse_threads_num),
+        speed_limit: parse_arg(&args, "speed_limit", parse_speed_limit),
     };
     // Tiny helper function which takes argument value from matches and parses it into actual value
-    fn parse_arg<T: FromStr>(args: &clap::ArgMatches, name: &str) -> T
-        where <T as FromStr>::Err: Debug // A bit of Rust traits magic
+    fn parse_arg<T, F: FnOnce(&str) -> T>(args: &clap::ArgMatches, name: &str, parse: F) -> T
     {
-        // Take value of argument by name, then unwrap it from option, then parse string slice, then unwrap result into value
-        args.value_of(name).unwrap().parse().unwrap()
+        // Take value of argument by name, then unwrap it from option and parse using external function
+        parse(args.value_of(name).unwrap())
+    }
+    // Check that specified string represents existing directory
+    fn parse_dir(value: &str) -> String {
+        assert!(fs::metadata(value).unwrap().is_dir());
+        value.to_owned() // Simply converts string to owned form
+    }
+    // Check that string is a path to existing file
+    fn parse_file(value: &str) -> String {
+        assert!(fs::metadata(value).unwrap().is_file());
+        value.to_owned()
+    }
+    // Number of threads, usize, 1 or more
+    fn parse_threads_num(value: &str) -> usize {
+        let value = value.parse().unwrap();
+        assert!(value > 0);
+        value
+    }
+    // Speed limit, taking suffixes into account
+    fn parse_speed_limit(value: &str) -> usize {
+        // char_indices will iterate string slice as a sequence of pairs,
+        // where first element is the byte offset of character, and the second is a Unicode character
+        // last() will return last iterator in sequence
+        match value.char_indices().last() {
+            None => 0, // Means string is empty, treat as 0
+            Some((last_index, last_char)) => {
+                let multiplier: usize = match last_char {
+                    'k' | 'K' => 1024,
+                    'm' | 'M' => 1024*1024,
+                    _ => 1
+                };
+                // We'll parse number without suffix
+                let number = if multiplier == 1 { value } else { &value[..last_index] };
+                number.parse().unwrap()
+            }
+        }
     }
 }
