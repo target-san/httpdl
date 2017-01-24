@@ -8,3 +8,4 @@ description = "Console HTTP file downloader, with support of multithreading and 
 clap        = "2.20.0"
 hyper       = "0.10.0"
 error-chain = "0.8.1"
+crossbeam   = "0.2.10"

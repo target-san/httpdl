@@ -3,6 +3,7 @@ extern crate clap;          // Declare external crate dependency
 extern crate hyper;
 #[macro_use]
 extern crate error_chain;
+extern crate crossbeam;
 // Import symbols from STDLIB or other crates
 use std::fs;                // Filesystem stuff
 use std::io::{self, Read, Write};  // We need this to invoke methods of Read trait
@@ -51,7 +52,12 @@ fn run() -> Result<()> {
         })
         .fuse(); // Will guarantee that iterator will steadily return None after sequence end
     
-    download_files(&args.dest_dir, urls_list);
+    crossbeam::scope(|scope| {
+        for i in 1..args.threads_num {
+            scope.spawn(|| download_files(&args.dest_dir, urls_list));
+        }
+        download_files(&args.dest_dir, urls_list);
+    });
 
     Ok(())
 }
