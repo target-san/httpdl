@@ -93,6 +93,48 @@ fn download_files<'a, I>(thread_num: usize, dir: &str, list: I) where I: Fn() ->
         }
     }
 }
+
+struct TokenBucket {
+    fill_rate: usize,
+    capacity:  usize,
+    remaining: f64,
+    timestamp: Instant,
+}
+
+impl TokenBucket {
+    // Fill rate will equal capacity, the most common case
+    fn new(rate: usize) -> TokenBucket {
+        TokenBucket::with_capacity(rate, rate)
+    }
+
+    fn with_capacity(rate: usize, capacity: usize) -> TokenBucket {
+        TokenBucket {
+            fill_rate: rate,
+            capacity:  capacity,
+            remaining: 0f64,
+            timestamp: Instant::now(),
+        }
+    }
+
+    fn take(&mut self, amount: usize) -> usize {
+        // 0. For zero fillrate, treat this bucket as infinite
+        if self.fill_rate == 0 {
+            return amount;
+        }
+        // 1. Compute how much time passed since last take, update timestamp
+        let delta = {
+            let now = Instant::now();
+            now - std::mem::replace(&mut self.timestamp, now)
+        };
+        // 2. Compute refill from delta time, update remaining
+        let delta_fill = ((delta.as_secs() as f64) + (delta.subsec_nanos() as f64) / 1_000_000_000f64) * (self.fill_rate as f64);
+        self.remaining = (self.remaining + delta_fill).min(self.capacity as f64);
+        // 3. Take as much as possible from bucket, but no more than is present there
+        let taken = std::cmp::min(self.remaining.floor() as usize, amount);
+        self.remaining = (self.remaining - (taken as f64)).max(0f64);
+        taken
+    }
+}
 // Download exactly one file
 fn download_file(url: &str, dir: &str, filename: &str) -> Result<()> {
     // Fire request to HTTP server via Hyper, obtain response
