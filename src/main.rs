@@ -8,9 +8,6 @@ use std::fs;                // Filesystem stuff
 use std::io::{self, Read, Write};  // We need this to invoke methods of Read trait
 use std::path::Path;        // FS paths manipulation
 
-use hyper::Client;
-use hyper::status::StatusCode;
-
 // Inline nested module
 mod errors {
     // Let's describe our errors
@@ -19,6 +16,7 @@ mod errors {
             Io(::std::io::Error);
             ParseInt(::std::num::ParseIntError);
             ArgError(::clap::Error);
+            Http(::hyper::Error);
         }
     }
 }
@@ -52,23 +50,37 @@ fn run() -> Result<()> {
             else { None } // Otherwise, signal that there's no pair for this particular line
         })
         .fuse(); // Will guarantee that iterator will steadily return None after sequence end
+    
+    download_files(&args.dest_dir, urls_list);
+
+    Ok(())
+}
+// Iterate through list of files and download them one by one
+fn download_files<'a, I>(dir: &str, list: I) where I: Iterator<Item=(&'a str, &'a str)> {
     // Iterate list of download targets
-    for (url, filename) in urls_list {
+    for (url, filename) in list {
         // Small info message, just for our convenience
         println!("Downloading: {} -> {}", url, filename);
-        // Fire request to HTTP server via Hyper, obtain response
-        let mut response = Client::new().get(url).send().unwrap();
-        // Check status, barf if it's not okay and skip downloading
-        if response.status != StatusCode::Ok {
-            let _ = writeln!(io::stderr(), "    HTTP request failed: {}", response.status);
-            continue;
+        if let Err(error) = download_file(url, dir, filename) {
+            let _ = writeln!(io::stderr(), "  Failed {} -> {}\n  Error: {}", url, filename, error);
+            for inner in error.iter().skip(1) {
+                let _ = writeln!(io::stderr(), "    Caused by: {}", inner);
+            }
         }
-        // Lastly, create target file
-        let mut file = fs::File::create(Path::new(&args.dest_dir).join(filename)).unwrap();
-        // And copy all the stuff there form response
-        let _ = io::copy(&mut response, &mut file).unwrap();
     }
-
+}
+// Download exactly one file
+fn download_file(url: &str, dir: &str, filename: &str) -> Result<()> {
+    // Fire request to HTTP server via Hyper, obtain response
+    let mut response = hyper::Client::new().get(url).send()?;
+    // Check status, bail-out if not okay
+    if !response.status.is_success() {
+        bail!("HTTP request failed - {}", response.status);
+    }
+    // Lastly, create target file
+    let mut file = fs::File::create(Path::new(dir).join(filename))?;
+    // And copy all the stuff there form response
+    let _ = io::copy(&mut response, &mut file)?;
     Ok(())
 }
 // Contains parsed arguments
