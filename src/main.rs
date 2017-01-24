@@ -149,6 +149,29 @@ fn download_file(url: &str, dir: &str, filename: &str) -> Result<()> {
     let _ = io::copy(&mut response, &mut file)?;
     Ok(())
 }
+// Copy between streams, limited by fillrate function
+fn copy_limited<R: Read + ?Sized, W: Write + ?Sized, F>(reader: &mut R, writer: &mut W, limit: F) -> io::Result<u64>
+    where F: Fn(usize) -> usize
+{
+    let mut buf = [0; 64 * 1024];
+    let mut written = 0;
+    loop {
+        let limit = limit(buf.len());
+        if limit == 0 {
+            std::thread::yield_now();
+            continue;
+        }
+        let mut part = &mut buf[..limit];
+        let len = match reader.read(&mut part) {
+            Ok(0) => return Ok(written),
+            Ok(len) => len,
+            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        writer.write_all(&mut part[..len])?;
+        written += len as u64;
+    }
+}
 // Contains parsed arguments
 struct Args {
     dest_dir: String,
