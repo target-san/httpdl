@@ -60,18 +60,29 @@ fn run() -> Result<()> {
         let urls_list = Mutex::new(urls_list);
         let urls_list = move || { urls_list.lock().unwrap().next() };
 
+        let bucket = Mutex::new(TokenBucket::new(args.speed_limit));
+        let bucket = move |amount| { bucket.lock().unwrap().take(amount) };
+
         crossbeam::scope(|scope| {
             for n in 1..args.threads_num {
                 let dir = &args.dest_dir;
                 let list = &urls_list;
-                scope.spawn(move || download_files(n, dir, list));
+                let bucket = &bucket;
+                scope.spawn(move || download_files(n, dir, list, bucket));
             }
-            download_files(0, &args.dest_dir, &urls_list);
+            download_files(0, &args.dest_dir, &urls_list, &bucket);
         });
     }
     else {
-        let urls_list = std::cell::RefCell::new(urls_list);
-        download_files(0, &args.dest_dir, move || { urls_list.borrow_mut().next() });
+        use std::cell::RefCell;
+        
+        let urls_list = RefCell::new(urls_list);
+        let list = move || { urls_list.borrow_mut().next() };
+        
+        let bucket = RefCell::new(TokenBucket::new(args.speed_limit));
+        let bucket = move |amount| { bucket.borrow_mut().take(amount) };
+
+        download_files(0, &args.dest_dir, list, bucket);
     }
 
     let time_passed = Instant::now().duration_since(start);
@@ -80,12 +91,14 @@ fn run() -> Result<()> {
     Ok(())
 }
 // Iterate through list of files and download them one by one
-fn download_files<'a, I>(thread_num: usize, dir: &str, list: I) where I: Fn() -> Option<(&'a str, &'a str)> {
+fn download_files<'a, I, L>(thread_num: usize, dir: &str, list: I, limit: L)
+    where I: Fn() -> Option<(&'a str, &'a str)>, L: Fn(usize) -> usize
+{
     // Iterate list of download targets
     while let Some((url, filename)) = list() {
         // Small info message, just for our convenience
         println!("#{} Downloading: {} -> {}", thread_num, url, filename);
-        if let Err(error) = download_file(url, dir, filename) {
+        if let Err(error) = download_file(url, dir, filename, &limit) {
             let _ = writeln!(io::stderr(), "!{3} Failed {} -> {}\n!{3} Error: {}", url, filename, error, thread_num);
             for inner in error.iter().skip(1) {
                 let _ = writeln!(io::stderr(), "!{}   Caused by: {}", thread_num, inner);
@@ -136,7 +149,7 @@ impl TokenBucket {
     }
 }
 // Download exactly one file
-fn download_file(url: &str, dir: &str, filename: &str) -> Result<()> {
+fn download_file<F: Fn(usize) -> usize>(url: &str, dir: &str, filename: &str, limit: F) -> Result<()> {
     // Fire request to HTTP server via Hyper, obtain response
     let mut response = hyper::Client::new().get(url).send()?;
     // Check status, bail-out if not okay
@@ -146,7 +159,7 @@ fn download_file(url: &str, dir: &str, filename: &str) -> Result<()> {
     // Lastly, create target file
     let mut file = fs::File::create(Path::new(dir).join(filename))?;
     // And copy all the stuff there form response
-    let _ = io::copy(&mut response, &mut file)?;
+    let _ = copy_limited(&mut response, &mut file, limit)?;
     Ok(())
 }
 // Copy between streams, limited by fillrate function
