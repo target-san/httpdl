@@ -9,6 +9,7 @@ use std::fs;                // Filesystem stuff
 use std::io::{self, Read, Write};  // We need this to invoke methods of Read trait
 use std::path::Path;        // FS paths manipulation
 use std::sync::Mutex;
+use std::time::Instant;
 
 // Inline nested module
 mod errors {
@@ -55,17 +56,23 @@ fn run() -> Result<()> {
     
     let urls_list = Mutex::new(urls_list);
 
+    let start = Instant::now();
     crossbeam::scope(|scope| {
-        for _ in 1..args.threads_num {
-            scope.spawn(|| download_files(&args.dest_dir, &urls_list));
+        for n in 1..args.threads_num {
+            let dir = &args.dest_dir;
+            let list = &urls_list;
+            scope.spawn(move || download_files(n, dir, list));
         }
-        download_files(&args.dest_dir, &urls_list);
+        download_files(0, &args.dest_dir, &urls_list);
     });
+
+    let time_passed = Instant::now().duration_since(start);
+    println!("Took {}.{} sec", time_passed.as_secs(), time_passed.subsec_nanos());
 
     Ok(())
 }
 // Iterate through list of files and download them one by one
-fn download_files<'a, I>(dir: &str, list: &Mutex<I>) where I: Iterator<Item=(&'a str, &'a str)> {
+fn download_files<'a, I>(thread_num: usize, dir: &str, list: &Mutex<I>) where I: Iterator<Item=(&'a str, &'a str)> {
     // Iterate list of download targets
     loop {
         let (url, filename) = match list.lock().unwrap().next() {
@@ -73,11 +80,11 @@ fn download_files<'a, I>(dir: &str, list: &Mutex<I>) where I: Iterator<Item=(&'a
             Some((url, filename)) => (url, filename)
         };
         // Small info message, just for our convenience
-        println!("Downloading: {} -> {}", url, filename);
+        println!("#{} Downloading: {} -> {}", thread_num, url, filename);
         if let Err(error) = download_file(url, dir, filename) {
-            let _ = writeln!(io::stderr(), "  Failed {} -> {}\n  Error: {}", url, filename, error);
+            let _ = writeln!(io::stderr(), "!{3} Failed {} -> {}\n!{3} Error: {}", url, filename, error, thread_num);
             for inner in error.iter().skip(1) {
-                let _ = writeln!(io::stderr(), "    Caused by: {}", inner);
+                let _ = writeln!(io::stderr(), "!{}   Caused by: {}", thread_num, inner);
             }
         }
     }
