@@ -7,22 +7,44 @@ extern crate error_chain;
 use std::fs;                // Filesystem stuff
 use std::io::{self, Read, Write};  // We need this to invoke methods of Read trait
 use std::path::Path;        // FS paths manipulation
-use std::process::exit;
 
 use hyper::Client;
 use hyper::status::StatusCode;
 
-// Main entry point
+// Inline nested module
+mod errors {
+    // Let's describe our errors
+    error_chain! {
+        foreign_links {
+            Io(::std::io::Error);
+            ParseInt(::std::num::ParseIntError);
+            ArgError(::clap::Error);
+        }
+    }
+}
+use errors::*;
+// main holds in fact only error reporting routines
 fn main() {
+    if let Err(error) = run() {
+        let _ = writeln!(io::stderr(), "Error: {}", error);
+        for inner in error.iter().skip(1) {
+            let _ = writeln!(io::stderr(), "  Caused by: {}", inner);
+        }
+        std::process::exit(1)
+    }
+}
+// Main entry point
+fn run() -> Result<()> {
     // Parse arguments 
-    let args = parse_args();
+    let args = parse_args()?;
     // Read text of list file into single string
-    let file_list_text = {
-        let mut file = fs::File::open(args.list_file).unwrap(); // Open file
-        let mut text = String::new();                           // Create buffer for file text
-        file.read_to_string(&mut text).unwrap();                // Read file text into buffer
-        text                                                    // Return buffer from block
-    };
+    let file_list_text = fs::File::open(&args.list_file)
+        .and_then(|mut file| {
+            let mut text = String::new();
+            file.read_to_string(&mut text)?;
+            Ok(text)
+        })
+        .chain_err(|| format!("Failed to read list file {}", &args.list_file))?;
     // Construct iterator over list of URLs and file names
     let urls_list = file_list_text
         .lines()    // Iterate over lines in buffer
@@ -37,7 +59,7 @@ fn main() {
             }
             else { None } // Otherwise, signal that there's no pair for this particular line
         })
-        .fuse();
+        .fuse(); // Will guarantee that iterator will steadily return None after sequence end
     // Iterate list of download targets
     for (url, filename) in urls_list {
         // Small info message, just for our convenience
@@ -54,6 +76,8 @@ fn main() {
         // And copy all the stuff there form response
         let _ = io::copy(&mut response, &mut file).unwrap();
     }
+
+    Ok(())
 }
 // Contains parsed arguments
 struct Args {
@@ -62,20 +86,9 @@ struct Args {
     threads_num: usize,
     speed_limit: usize,
 }
-// Inline nested module
-mod parse_args_errors {
-    // Let's describe our errors
-    error_chain! {
-        foreign_links {
-            Io(::std::io::Error);
-            ParseInt(::std::num::ParseIntError);
-        }
-    }
-}
 // Parse arguments from command line; any errors handled internally
-fn parse_args() -> Args {
+fn parse_args() -> Result<Args> {
     use clap::Arg;  // We can import external symbols at any scope
-    use parse_args_errors::*;
     // Here, we define argument parser
     let args = app_from_crate!()
         .arg(Arg::with_name("dest_dir")
@@ -104,29 +117,14 @@ Suffixes supported:
             .short("l")
             .default_value("0")
         )
-        .get_matches(); // Will either return arguments map or interrupt program with descriptive error
-
-    return match parse_args_inner(&args) {
-        Ok(args) => args,
-        Err(error) => {
-            let _ = writeln!(io::stderr(), "Error: {}", error);
-            for inner in error.iter().skip(1) {
-                let _ = writeln!(io::stderr(), "  Caused by: {}", inner);
-            }
-            let _ = writeln!(io::stderr(), "{}", args.usage());
-            exit(1)
-        }
-    };
-    
-    fn parse_args_inner(args: &clap::ArgMatches) -> Result<Args> {
-        // Simply return Args structure, with all arguments parsef
-        Ok(Args {
-            dest_dir:    parse_arg(&args, "dest_dir",    parse_dir)?,
-            list_file:   parse_arg(&args, "list_file",   parse_file)?,
-            threads_num: parse_arg(&args, "threads_num", parse_threads_num)?,
-            speed_limit: parse_arg(&args, "speed_limit", parse_speed_limit)?,
-        })
-    }
+        .get_matches_safe()?;
+    // Simply return Args structure, with all arguments parsed
+    return Ok(Args {
+        dest_dir:    parse_arg(&args, "dest_dir",    parse_dir)?,
+        list_file:   parse_arg(&args, "list_file",   parse_file)?,
+        threads_num: parse_arg(&args, "threads_num", parse_threads_num)?,
+        speed_limit: parse_arg(&args, "speed_limit", parse_speed_limit)?,
+    });
     // Tiny helper function which takes argument value from matches and parses it into actual value
     fn parse_arg<T, F>(args: &clap::ArgMatches, name: &str, parse: F) -> Result<T>
         where F: FnOnce(&str) -> Result<T>
