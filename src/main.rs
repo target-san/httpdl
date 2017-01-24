@@ -54,17 +54,25 @@ fn run() -> Result<()> {
         })
         .fuse(); // Will guarantee that iterator will steadily return None after sequence end
     
-    let urls_list = Mutex::new(urls_list);
-
     let start = Instant::now();
-    crossbeam::scope(|scope| {
-        for n in 1..args.threads_num {
-            let dir = &args.dest_dir;
-            let list = &urls_list;
-            scope.spawn(move || download_files(n, dir, list));
-        }
-        download_files(0, &args.dest_dir, &urls_list);
-    });
+
+    if args.threads_num > 1 {
+        let urls_list = Mutex::new(urls_list);
+        let urls_list = move || { urls_list.lock().unwrap().next() };
+
+        crossbeam::scope(|scope| {
+            for n in 1..args.threads_num {
+                let dir = &args.dest_dir;
+                let list = &urls_list;
+                scope.spawn(move || download_files(n, dir, list));
+            }
+            download_files(0, &args.dest_dir, &urls_list);
+        });
+    }
+    else {
+        let urls_list = std::cell::RefCell::new(urls_list);
+        download_files(0, &args.dest_dir, move || { urls_list.borrow_mut().next() });
+    }
 
     let time_passed = Instant::now().duration_since(start);
     println!("Took {}.{} sec", time_passed.as_secs(), time_passed.subsec_nanos());
@@ -72,13 +80,9 @@ fn run() -> Result<()> {
     Ok(())
 }
 // Iterate through list of files and download them one by one
-fn download_files<'a, I>(thread_num: usize, dir: &str, list: &Mutex<I>) where I: Iterator<Item=(&'a str, &'a str)> {
+fn download_files<'a, I>(thread_num: usize, dir: &str, list: I) where I: Fn() -> Option<(&'a str, &'a str)> {
     // Iterate list of download targets
-    loop {
-        let (url, filename) = match list.lock().unwrap().next() {
-            None => break,
-            Some((url, filename)) => (url, filename)
-        };
+    while let Some((url, filename)) = list() {
         // Small info message, just for our convenience
         println!("#{} Downloading: {} -> {}", thread_num, url, filename);
         if let Err(error) = download_file(url, dir, filename) {
