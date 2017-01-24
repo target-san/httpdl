@@ -8,6 +8,7 @@ extern crate crossbeam;
 use std::fs;                // Filesystem stuff
 use std::io::{self, Read, Write};  // We need this to invoke methods of Read trait
 use std::path::Path;        // FS paths manipulation
+use std::sync::Mutex;
 
 // Inline nested module
 mod errors {
@@ -52,19 +53,25 @@ fn run() -> Result<()> {
         })
         .fuse(); // Will guarantee that iterator will steadily return None after sequence end
     
+    let urls_list = Mutex::new(urls_list);
+
     crossbeam::scope(|scope| {
-        for i in 1..args.threads_num {
-            scope.spawn(|| download_files(&args.dest_dir, urls_list));
+        for _ in 1..args.threads_num {
+            scope.spawn(|| download_files(&args.dest_dir, &urls_list));
         }
-        download_files(&args.dest_dir, urls_list);
+        download_files(&args.dest_dir, &urls_list);
     });
 
     Ok(())
 }
 // Iterate through list of files and download them one by one
-fn download_files<'a, I>(dir: &str, list: I) where I: Iterator<Item=(&'a str, &'a str)> {
+fn download_files<'a, I>(dir: &str, list: &Mutex<I>) where I: Iterator<Item=(&'a str, &'a str)> {
     // Iterate list of download targets
-    for (url, filename) in list {
+    loop {
+        let (url, filename) = match list.lock().unwrap().next() {
+            None => break,
+            Some((url, filename)) => (url, filename)
+        };
         // Small info message, just for our convenience
         println!("Downloading: {} -> {}", url, filename);
         if let Err(error) = download_file(url, dir, filename) {
