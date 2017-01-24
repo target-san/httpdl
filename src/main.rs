@@ -24,15 +24,7 @@ mod errors {
 }
 use errors::*;
 // main holds in fact only error reporting routines
-fn main() {
-    if let Err(error) = run() {
-        let _ = writeln!(io::stderr(), "Error: {}", error);
-        for inner in error.iter().skip(1) {
-            let _ = writeln!(io::stderr(), "  Caused by: {}", inner);
-        }
-        std::process::exit(1)
-    }
-}
+quick_main!(run);
 // Main entry point
 fn run() -> Result<()> {
     // Parse arguments 
