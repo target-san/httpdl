@@ -1,0 +1,6 @@
+[package]
+name = "httpdl"
+version = "0.1.0"
+authors = ["Target-san <target.san@gmail.com>"]
+
+[dependencies]
