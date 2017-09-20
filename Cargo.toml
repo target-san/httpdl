@@ -1,6 +1,9 @@
 [package]
-name = "httpdl"
-version = "0.1.0"
-authors = ["Target-san <target.san@gmail.com>"]
+name        = "httpdl"
+version     = "0.1.0"
+authors     = ["Igor Baidiuk <target.san@gmail.com>"]
+description = "A simple multithreaded HTTP downloader"
 
 [dependencies]
+structopt           = "*"
+structopt-derive    = "*"
