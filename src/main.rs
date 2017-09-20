@@ -4,6 +4,9 @@ extern crate structopt;
 
 use structopt::StructOpt;
 
+use std::{io, fs};
+use std::str::FromStr;
+
 fn main() {
     let args = Args::from_args();
     println!("Arguments so far: {:?}", args);
@@ -14,17 +17,35 @@ fn main() {
 struct Args {
     #[structopt(short = "o")]
     /// Destination dir where to store downloaded files
-    dest_dir: String,
+    dest_dir:    DirEntry,
     #[structopt(short = "f")]
     /// File which lists all download URLs and their respective local names
-    list_file: String,
+    list_file:   String,
     #[structopt(short = "n", default_value = "1")]
     /// Number of concurrent downloader threads
     threads_num: usize,
-    #[structopt(short = "l", default_value = "0")]
-    /// Maximum download speed, in bytes per second; '0' means no limit
-    /// Supported suffixes for value:
-    ///     k, K - kilobytes, multiples of 1024s
-    ///     m, M - megabytes, multiples of 1024*1024
+    #[structopt(short = "l", default_value = "0", help =
+"Maximum download speed, in bytes per second; '0' means no limit;
+Supported suffixes for value:
+    k, K - kilobytes, multiples of 1024s
+    m, M - megabytes, multiples of 1024*1024
+")]
     speed_limit: usize,
+}
+
+#[derive(Debug)]
+struct DirEntry(String);
+
+impl FromStr for DirEntry {
+    type Err = io::Error;
+    fn from_str(path: &str) -> io::Result<Self> {
+        if fs::metadata(path)?.is_dir() {
+            Ok(DirEntry(path.to_owned()))
+        }
+        else {
+            Err(
+                io::Error::new(io::ErrorKind::NotFound, format!("{}: not a directory", path))
+            )
+        }
+    }
 }
