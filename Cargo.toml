@@ -7,3 +7,4 @@ description = "A simple multithreaded HTTP downloader"
 [dependencies]
 structopt           = "*"
 structopt-derive    = "*"
+error-chain         = "*"

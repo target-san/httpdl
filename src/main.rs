@@ -2,11 +2,31 @@
 extern crate structopt_derive;
 extern crate structopt;
 
+#[macro_use]
+extern crate error_chain;
+
 use structopt::StructOpt;
 
 use std::{io, fs};
 use std::str::FromStr;
 
+mod errors {
+    error_chain! {
+        foreign_links {
+            Io(::std::io::Error);
+        }
+    }
+}
+
+use errors::*;
+/*
+quick_main!(|| {
+    let matches = Args::clap().get_matches_safe()?;
+    let args = Args::from_clap(matches);
+
+    Ok(())
+});
+*/
 fn main() {
     let args = Args::from_args();
     println!("Arguments so far: {:?}", args);
@@ -37,16 +57,12 @@ Supported suffixes for value:
 struct DirEntry(String);
 
 impl FromStr for DirEntry {
-    type Err = io::Error;
-    fn from_str(path: &str) -> io::Result<Self> {
+    type Err = Error;
+    fn from_str(path: &str) -> Result<Self> {
         if fs::metadata(path)?.is_dir() {
             Ok(DirEntry(path.to_owned()))
         }
-        else {
-            Err(
-                io::Error::new(io::ErrorKind::NotFound, format!("{}: not a directory", path))
-            )
-        }
+        else { bail!("{}: not a directory", path) }
     }
 }
 
@@ -54,15 +70,11 @@ impl FromStr for DirEntry {
 struct FileEntry(String);
 
 impl FromStr for FileEntry {
-    type Err = io::Error;
-    fn from_str(path: &str) -> io::Result<Self> {
+    type Err = Error;
+    fn from_str(path: &str) -> Result<Self> {
         if fs::metadata(path)?.is_file() {
             Ok(FileEntry(path.to_owned()))
         }
-        else {
-            Err(
-                io::Error::new(io::ErrorKind::NotFound, format!("{}: not a file", path))
-            )
-        }
+        else { bail!("{}: not a file", path) }
     }
 }
