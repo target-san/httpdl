@@ -20,7 +20,7 @@ struct Args {
     dest_dir:    DirEntry,
     #[structopt(short = "f")]
     /// File which lists all download URLs and their respective local names
-    list_file:   String,
+    list_file:   FileEntry,
     #[structopt(short = "n", default_value = "1")]
     /// Number of concurrent downloader threads
     threads_num: usize,
@@ -45,6 +45,23 @@ impl FromStr for DirEntry {
         else {
             Err(
                 io::Error::new(io::ErrorKind::NotFound, format!("{}: not a directory", path))
+            )
+        }
+    }
+}
+
+#[derive(Debug)]
+struct FileEntry(String);
+
+impl FromStr for FileEntry {
+    type Err = io::Error;
+    fn from_str(path: &str) -> io::Result<Self> {
+        if fs::metadata(path)?.is_file() {
+            Ok(FileEntry(path.to_owned()))
+        }
+        else {
+            Err(
+                io::Error::new(io::ErrorKind::NotFound, format!("{}: not a file", path))
             )
         }
     }
