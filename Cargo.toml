@@ -8,8 +8,9 @@ edition     = "2021"
 [dependencies]
 clap            = "2.20.0"
 thread-scoped   = "1.0.1"
-error-chain     = "0.7.2"
 hyper           = "0.10.0"
+thiserror       = "1.0.31"
+anyhow          = "1.0.58"
 
 [dev-dependencies]
 rand = "0.8.5"

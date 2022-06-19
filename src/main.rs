@@ -1,8 +1,6 @@
 // First, we declare all external dependencies we need here
 #[macro_use]
 extern crate clap;
-#[macro_use] // Has in fact only macros which generate types for us
-extern crate error_chain;
 extern crate hyper;
 extern crate thread_scoped;
 // Next, import actual symbols and modules we need
@@ -19,6 +17,8 @@ use std::thread;
 use hyper::status::StatusCode;
 
 use thread_scoped::scoped;
+
+use thiserror::Error;
 
 mod token_bucket;
 use token_bucket::TokenBucket;
@@ -91,27 +91,11 @@ struct Args
     speed_limit: usize,
 }
 
-mod parse_args_errors {
-    error_chain! {
-        types {}
-        links {}
-        foreign_links {
-            Io(::std::io::Error);
-            ParseInt(::std::num::ParseIntError);
-        }
-        errors {
-            ArgError(arg: String) {
-                description("Error parsing command line argument")
-                display("Error parsing command line argument <{}>", arg)
-            }
-        }
-    }
-}
 // Parse command line arguments
 fn parse_args() -> Args {
     // Import errors definitions related to parsing arguments
     use clap::Arg;
-    use parse_args_errors::*;
+    use anyhow::{bail, Context, Result};
     // Define command line parser
     // NB: app_from_crate macro simply sets several useful defaults
     let args = app_from_crate!()
@@ -149,7 +133,7 @@ Suffixes supported:
         Ok(value) => value,
         Err(err)  => {
             eprintln!("Error: {}", err);
-            for e in err.iter().skip(1) {
+            for e in err.chain().skip(1) {
                 eprintln!("  Caused by: {}", e);
             }
             eprintln!("{}", args.usage());
@@ -173,7 +157,8 @@ Suffixes supported:
         where F: FnOnce(&str) -> Result<T>
     {
         // Simply invoke argument parser and wrap any Err passing by with chain_err
-        func(args.value_of(name).unwrap()).chain_err(|| ErrorKind::ArgError(name.to_owned()))
+        func(args.value_of(name).unwrap())
+            .with_context(|| format!("Error parsing command line argument <{}>", name))
     }
     // Check that destination path is a directory and exists
     fn arg_dest_dir(arg: &str) -> Result<String> {
@@ -237,26 +222,14 @@ fn pull_files<'a, I>(thread_num: usize, dest_dir: &str, bucket: &Mutex<TokenBuck
     }
 }
 
-quick_error! {
-    #[derive(Debug)]
-    enum DownloadError {
-        Hyper(error: hyper::Error) {
-            description("HTTP request error")
-            cause(error)
-            display(me) -> ("{}: {}", me.description(), error)
-            from()
-        }
-        Server(status: StatusCode) {
-            description("HTTP request error")
-            display(me) -> ("{}: code {}", me.description(), status)
-        }
-        Io(error: std::io::Error) {
-            description("I/O error")
-            cause(error)
-            display(me) -> ("{}: {}", me.description(), error)
-            from()
-        }
-    }
+#[derive(Error, Debug)]
+enum DownloadError {
+    #[error("HTTP request error: {0}")]
+    Hyper(#[from] hyper::Error),
+    #[error("HTTP request error: code {0}")]
+    Server(StatusCode),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 fn pull_file(src_url: &str, dest_path: &Path, bucket: &Mutex<TokenBucket>) -> Result<(), DownloadError> {
