@@ -23,10 +23,6 @@ use thread_scoped::scoped;
 mod token_bucket;
 use token_bucket::TokenBucket;
 
-// A small helper macro which is like println! but for stderr
-macro_rules! errorln {
-    ($($arg:tt)*) => { let _ = writeln!(io::stderr(), $($arg)*); };
-}
 // Program starting point, as usual
 fn main() {
     // First, parse arguments
@@ -37,14 +33,14 @@ fn main() {
         let mut fd = match fs::File::open(&list_file) {
             Ok(val) => val,
             Err(err)  => {
-                errorln!("Failed to open {}: {}", list_file, err);
+                eprintln!("Failed to open {}: {}", list_file, err);
                 exit(1)
             }
         };
         // Then read all of its contents into buffer
         let mut text = String::new();
         if let Err(err) = fd.read_to_string(&mut text) {
-            errorln!("Failed to read contents of {}: {}", list_file, err);
+            eprintln!("Failed to read contents of {}: {}", list_file, err);
             exit(1)
         }
         text
@@ -152,11 +148,11 @@ Suffixes supported:
     return match process_args(&args) {
         Ok(value) => value,
         Err(err)  => {
-            errorln!("Error: {}", err);
+            eprintln!("Error: {}", err);
             for e in err.iter().skip(1) {
-                errorln!("  Caused by: {}", e);
+                eprintln!("  Caused by: {}", e);
             }
-            errorln!("{}", args.usage());
+            eprintln!("{}", args.usage());
             exit(1);
         }
     };
@@ -236,7 +232,7 @@ fn pull_files<'a, I>(thread_num: usize, dest_dir: &str, bucket: &Mutex<TokenBuck
         };
         println!("#{}: Downloading {} -> {}", thread_num, url, dest_path.display());
         if let Err(error) = pull_file(url, &dest_path, bucket) {
-            errorln!("#{}: Failed {} -> {} due to:\n    {}", thread_num, url, dest_path.display(), error);
+            eprintln!("#{}: Failed {} -> {} due to:\n    {}", thread_num, url, dest_path.display(), error);
         }
     }
 }
