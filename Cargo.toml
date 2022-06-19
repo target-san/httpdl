@@ -3,6 +3,7 @@ name        = "httpdl"
 version     = "0.3.0"
 authors     = ["Igor Baidiuk <target.san@gmail.com>"]
 description = "A simple HTTP file downloader. Supports specifying number of threads and limiting download speed"
+edition     = "2021"
 
 [dependencies]
 clap            = "2.20.0"
