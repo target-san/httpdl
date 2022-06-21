@@ -8,7 +8,7 @@ pub struct TokenBucket {
     timestamp: Instant,
 }
 
-fn duration_seconds(d: Duration) -> f64{
+fn duration_seconds(d: Duration) -> f64 {
     (d.as_secs() as f64) + (d.subsec_nanos() as f64) / 1_000_000_000f64
 }
 
