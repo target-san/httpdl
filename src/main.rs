@@ -1,7 +1,6 @@
 // First, we declare all external dependencies we need here
 #[macro_use]
 extern crate clap;
-extern crate hyper;
 extern crate thread_scoped;
 // Next, import actual symbols and modules we need
 use std::fs;
@@ -13,8 +12,6 @@ use std::process::exit;
 use std::str::FromStr;
 use std::sync::Mutex;
 use std::thread;
-
-use hyper::status::StatusCode;
 
 use thread_scoped::scoped;
 
@@ -225,17 +222,17 @@ fn pull_files<'a, I>(thread_num: usize, dest_dir: &str, bucket: &Mutex<TokenBuck
 #[derive(Error, Debug)]
 enum DownloadError {
     #[error("HTTP request error: {0}")]
-    Hyper(#[from] hyper::Error),
+    Reqwest(#[from] reqwest::Error),
     #[error("HTTP request error: code {0}")]
-    Server(StatusCode),
+    StatusCode(reqwest::StatusCode),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
 
 fn pull_file(src_url: &str, dest_path: &Path, bucket: &Mutex<TokenBucket>) -> Result<(), DownloadError> {
-    let mut response = hyper::Client::new().get(src_url).send()?;
-    if response.status != hyper::status::StatusCode::Ok {
-        return Err(DownloadError::Server(response.status));
+    let mut response = reqwest::blocking::get(src_url)?;
+    if response.status() != reqwest::StatusCode::OK {
+        return Err(DownloadError::StatusCode(response.status()));
     }
     let mut dest_file = fs::File::create(&dest_path)?;
     let _ = copy_limited(&mut response, &mut dest_file, bucket)?;
