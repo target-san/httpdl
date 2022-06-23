@@ -1,7 +1,4 @@
 // First, we declare all external dependencies we need here
-#[macro_use]
-extern crate clap;
-extern crate thread_scoped;
 use std::cell::RefCell;
 // Next, import actual symbols and modules we need
 use std::fs;
@@ -11,6 +8,7 @@ use std::path::Path;
 use std::process::exit;
 use std::sync::Mutex;
 
+use clap::Parser;
 use thread_scoped::scoped;
 
 use thiserror::Error;
@@ -19,7 +17,7 @@ mod token_bucket;
 use token_bucket::TokenBucket;
 
 mod config;
-use config::{Config, parse_args};
+use config::Config;
 
 mod copy_with_speedlimit;
 use copy_with_speedlimit::copy_with_speedlimit;
@@ -27,7 +25,7 @@ use copy_with_speedlimit::copy_with_speedlimit;
 // Program starting point, as usual
 fn main() {
     // First, parse arguments
-    let Config { dest_dir, list_file, threads_num, speed_limit } = parse_args();
+    let Config { dest_dir, list_file, threads_num, speed_limit } = Config::parse();
     // Now, we read whole list file and then fill files mapping
     let all_text = {
         // Open file with list of files to download

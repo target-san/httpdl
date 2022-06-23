@@ -6,7 +6,7 @@ description = "A simple HTTP file downloader. Supports specifying number of thre
 edition     = "2021"
 
 [dependencies]
-clap            = "2.20.0"
+clap            = { version = "3.2.6", features = [ "derive" ] }
 thread-scoped   = "1.0.1"
 thiserror       = "1.0.31"
 anyhow          = "1.0.58"
