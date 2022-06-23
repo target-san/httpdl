@@ -2,6 +2,7 @@
 #[macro_use]
 extern crate clap;
 extern crate thread_scoped;
+use std::cell::RefCell;
 // Next, import actual symbols and modules we need
 use std::fs;
 // NB: to use Read and Write traits, we need to bring them into scope explicitly
@@ -57,26 +58,71 @@ fn main() {
             else { None }
         })
         .fuse();
+    // If number of threads is 1, use non-threaded version
+    if threads_num == 1 {
+        // In case of single thread, wrap both files sequence and bucket
+        // into RefCell to preserve immutable-to-mutable lifetimes transition
+        // In principle, this may be achieved via smth like UnsafeCell (?),
+        // but we don't care that much about performance
+        let files_seq = RefCell::new(files_seq);
+        let fetch_src_dest = move || {
+            files_seq
+                .try_borrow_mut()
+                .ok()
+                .map(|mut seq| seq.next())
+                .flatten()
+        };
+
+        let bucket = RefCell::new(TokenBucket::new(speed_limit));
+        let take_tokens = move |amount| {
+            bucket
+                .try_borrow_mut()
+                .ok()
+                .map(|mut bucket| bucket.take(amount))
+                .unwrap_or(0)
+        };
+        
+        pull_files(0, &dest_dir, &take_tokens, &fetch_src_dest);
+        return;
+    }
+    // Otherwise, pack files sequence and token bucket under mutex
+    // and run N-1 additional threads
+
     // To consume this iterator in case of multithreading, we put it under mutex
     let files_seq = Mutex::new(files_seq);
+    let fetch_src_dest = move || {
+        files_seq
+            .try_lock()
+            .ok()
+            .map(|mut seq| seq.next())
+            .flatten()
+    };
     // Also, construct token bucket to control download speed
     // And put it under mutex likewise
     let bucket = Mutex::new(TokenBucket::new(speed_limit));
+    let take_tokens = move |amount| {
+        bucket
+            .try_lock()
+            .ok()
+            .map(|mut bucket| bucket.take(amount))
+            .unwrap_or(0)
+    };
+
     // Pool for N-1 worker thread guards 
     let mut worker_guards = Vec::with_capacity(threads_num - 1);
     // Finally, create worker threads
     for i in 1..threads_num {
         // A minor annoyance - we need to create separate reference variables
-        let seq_ref = &files_seq;
-        let bucket_ref = &bucket;
+        let fetch_src_dest_ref = &fetch_src_dest;
+        let take_tokens_ref = &take_tokens;
         let dest_dir_ref = &dest_dir;
         // Create scoped worker thread and put its guard object to vector
         worker_guards.push(
-            unsafe { scoped(move || pull_files(i, dest_dir_ref, bucket_ref, seq_ref)) }
+            unsafe { scoped(move || pull_files(i, dest_dir_ref, take_tokens_ref, fetch_src_dest_ref)) }
         );
     }
     // Main thread would do just the same as worker ones, summing up to N threads
-    pull_files(0, &dest_dir, &bucket, &files_seq);
+    pull_files(0, &dest_dir, &take_tokens, &fetch_src_dest);
     // Vector of guards will be dropped right here
 }
 // Pre-parsed arguments received from command line
@@ -203,12 +249,15 @@ Suffixes supported:
     }
 }
 
-fn pull_files<'a, I>(thread_num: usize, dest_dir: &str, bucket: &Mutex<TokenBucket>, list: &Mutex<I>)
-    where I: Iterator<Item = (&'a str, &'a str)> + Send
-{
+fn pull_files<'a>(
+    thread_num: usize,
+    dest_dir: &str,
+    bucket: &impl Fn(usize) -> usize,
+    fetch_src_dest: &impl Fn() -> Option<(&'a str, &'a str)>
+) {
     loop {
         // Having this as separate expression should prevent locking for the whole duration
-        let (url, dest_path) = match list.lock().unwrap().next() {
+        let (url, dest_path) = match fetch_src_dest() {
             None => break,
             Some((url, dest)) => (url, Path::new(dest_dir).join(dest)) 
         };
@@ -229,7 +278,7 @@ enum DownloadError {
     Io(#[from] std::io::Error),
 }
 
-fn pull_file(src_url: &str, dest_path: &Path, bucket: &Mutex<TokenBucket>) -> Result<(), DownloadError> {
+fn pull_file(src_url: &str, dest_path: &Path, bucket: &impl Fn(usize) -> usize) -> Result<(), DownloadError> {
     let mut response = reqwest::blocking::get(src_url)?;
     if response.status() != reqwest::StatusCode::OK {
         return Err(DownloadError::StatusCode(response.status()));
@@ -239,11 +288,11 @@ fn pull_file(src_url: &str, dest_path: &Path, bucket: &Mutex<TokenBucket>) -> Re
     Ok(())
 }
 
-fn copy_limited<R: Read + ?Sized, W: Write + ?Sized>(reader: &mut R, writer: &mut W, bucket: &Mutex<TokenBucket>) -> io::Result<u64> {
+fn copy_limited<R: Read + ?Sized, W: Write + ?Sized>(reader: &mut R, writer: &mut W, bucket: &impl Fn(usize) -> usize) -> io::Result<u64> {
     let mut buf = [0; 64 * 1024];
     let mut written = 0;
     loop {
-        let limit = bucket.lock().unwrap().take(buf.len());
+        let limit = bucket(buf.len());
         if limit == 0 {
             thread::yield_now();
             continue;
