@@ -6,12 +6,10 @@ use std::cell::RefCell;
 // Next, import actual symbols and modules we need
 use std::fs;
 // NB: to use Read and Write traits, we need to bring them into scope explicitly
-use std::io::{self, Read, Write};
+use std::io::Read;
 use std::path::Path;
 use std::process::exit;
-// Same as for Read/Write, or we won't be able to do usize::from_str later
 use std::sync::Mutex;
-use std::thread;
 
 use thread_scoped::scoped;
 
@@ -22,6 +20,9 @@ use token_bucket::TokenBucket;
 
 mod config;
 use config::{Config, parse_args};
+
+mod copy_with_speedlimit;
+use copy_with_speedlimit::copy_with_speedlimit;
 
 // Program starting point, as usual
 fn main() {
@@ -135,7 +136,7 @@ fn pull_files<'a>(
     fetch_src_dest: &impl Fn() -> Option<(&'a str, &'a str)>
 ) {
     loop {
-        // Having this as separate expression should prevent locking for the whole duration
+        // Retrieve next file in sequence
         let (url, dest_path) = match fetch_src_dest() {
             None => break,
             Some((url, dest)) => (url, Path::new(dest_dir).join(dest)) 
@@ -163,27 +164,6 @@ fn pull_file(src_url: &str, dest_path: &Path, bucket: &impl Fn(usize) -> usize) 
         return Err(DownloadError::StatusCode(response.status()));
     }
     let mut dest_file = fs::File::create(&dest_path)?;
-    let _ = copy_limited(&mut response, &mut dest_file, bucket)?;
+    let _ = copy_with_speedlimit(&mut response, &mut dest_file, bucket)?;
     Ok(())
-}
-
-fn copy_limited<R: Read + ?Sized, W: Write + ?Sized>(reader: &mut R, writer: &mut W, bucket: &impl Fn(usize) -> usize) -> io::Result<u64> {
-    let mut buf = [0; 64 * 1024];
-    let mut written = 0;
-    loop {
-        let limit = bucket(buf.len());
-        if limit == 0 {
-            thread::yield_now();
-            continue;
-        }
-        let mut part = &mut buf[..limit];
-        let len = match reader.read(&mut part) {
-            Ok(0) => return Ok(written),
-            Ok(len) => len,
-            Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        };
-        writer.write_all(&mut part[..len])?;
-        written += len as u64;
-    }
 }
