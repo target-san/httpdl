@@ -1,18 +1,21 @@
-// First, we declare all external dependencies we need here
+//
+// Uses from stdlib
+//
 use std::cell::RefCell;
-// Next, import actual symbols and modules we need
 use std::fs;
-// NB: to use Read and Write traits, we need to bring them into scope explicitly
 use std::io::Read;
 use std::path::Path;
 use std::process::exit;
 use std::sync::Mutex;
-
+//
+// Uses from external crates
+//
 use clap::Parser;
-use thread_scoped::scoped;
-
+use crossbeam_utils::thread::scope;
 use thiserror::Error;
-
+//
+// Submodules
+//
 mod token_bucket;
 use token_bucket::TokenBucket;
 
@@ -108,23 +111,20 @@ fn main() {
             .map(|mut bucket| bucket.take(amount))
             .unwrap_or(0)
     };
-
-    // Pool for N-1 worker thread guards 
-    let mut worker_guards = Vec::with_capacity(threads_num - 1);
-    // Finally, create worker threads
-    for i in 1..threads_num {
-        // A minor annoyance - we need to create separate reference variables
-        let fetch_src_dest_ref = &fetch_src_dest;
-        let take_tokens_ref = &take_tokens;
-        let dest_dir_ref = &dest_dir;
-        // Create scoped worker thread and put its guard object to vector
-        worker_guards.push(
-            unsafe { scoped(move || pull_files(i, dest_dir_ref, take_tokens_ref, fetch_src_dest_ref)) }
-        );
-    }
-    // Main thread would do just the same as worker ones, summing up to N threads
-    pull_files(0, &dest_dir, &take_tokens, &fetch_src_dest);
-    // Vector of guards will be dropped right here
+    // Spawn N-1 worker threads and then run processing on current thread too
+    let _ = scope(|s| {
+        for i in 1..threads_num {
+            // A minor annoyance - we need to create separate reference variables
+            // to move them into closure
+            let fetch_src_dest_ref = &fetch_src_dest;
+            let take_tokens_ref = &take_tokens;
+            let dest_dir_ref = &dest_dir;
+            // Create scoped worker thread
+            s.spawn(move |_| pull_files(i, dest_dir_ref, take_tokens_ref, fetch_src_dest_ref));
+        }
+        // Main thread would do just the same as worker ones, summing up to N threads
+        pull_files(0, &dest_dir, &take_tokens, &fetch_src_dest);
+    });
 }
 
 fn pull_files<'a>(
