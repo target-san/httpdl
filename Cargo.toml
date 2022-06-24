@@ -1,11 +1,16 @@
 [package]
 name        = "httpdl"
-version     = "0.3.0"
+version     = "0.4.0"
 authors     = ["Igor Baidiuk <target.san@gmail.com>"]
 description = "A simple HTTP file downloader. Supports specifying number of threads and limiting download speed"
+edition     = "2021"
 
 [dependencies]
-clap            = "2.20.0"
+clap            = { version = "3.2.6", features = [ "derive" ] }
 thread-scoped   = "1.0.1"
-error-chain     = "0.7.2"
-hyper           = "0.10.0"
+thiserror       = "1.0.31"
+anyhow          = "1.0.58"
+reqwest         = { version = "0.11.11", features = [ "multipart", "blocking" ] }
+
+[dev-dependencies]
+rand            = "0.8.5"
