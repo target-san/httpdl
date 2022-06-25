@@ -13,4 +13,5 @@ reqwest         = { version = "0.11.11", features = [ "multipart", "blocking" ] 
 crossbeam-utils = "0.8.10"
 
 [dev-dependencies]
+assert_matches  = "1.5.0"
 rand            = "0.8.5"
