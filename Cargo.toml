@@ -1,6 +1,6 @@
 [package]
 name        = "httpdl"
-version     = "0.4.0"
+version     = "0.4.1"
 authors     = ["Igor Baidiuk <target.san@gmail.com>"]
 description = "A simple HTTP file downloader. Supports specifying number of threads and limiting download speed"
 edition     = "2021"
