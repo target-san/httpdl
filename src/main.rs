@@ -3,7 +3,7 @@
 //
 use std::cell::RefCell;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::exit;
 use std::sync::Mutex;
@@ -12,7 +12,7 @@ use std::sync::Mutex;
 //
 use clap::Parser;
 use crossbeam_utils::thread::scope;
-use thiserror::Error;
+use anyhow::Result;
 //
 // Submodules
 //
@@ -50,7 +50,7 @@ fn main() {
     // Next, we split the whole file into lines in-place
     // And for each line which contains proper url-filename tuple,
     // We yield that tuple
-    let files_seq = all_text
+    let mut files_seq = all_text
         .lines()
         .filter_map(|line| {
             let mut pieces = line.split(|c| " \r\n\t".contains(c)).filter(|s| !s.is_empty());
@@ -62,106 +62,107 @@ fn main() {
             else { None }
         })
         .fuse();
-    // If number of threads is 1, use non-threaded version
+
+    let mut bucket = TokenBucket::new(speed_limit);
+    let dest_dir = Path::new(&dest_dir);
+
+    let _ = copy_streams(
+        threads_num,
+        move |_| {
+            files_seq.next().map(|(url, name)| {
+                let dest_path = dest_dir.join(name);
+                let response = reqwest::blocking::get(url)?;
+                let dest_file = fs::File::create(&dest_path)?;
+                
+                Ok((response, dest_file))
+            })
+        },
+        move |amount| bucket.take(amount)
+    );
+}
+
+fn copy_streams<F, L, R, W>(threads_num: usize, stream_fn: F, limiter_fn: L) -> Result<()>
+    where
+        F: FnMut(usize) -> Option<Result<(R, W)>>,
+        F: Send,
+        L: FnMut(usize) -> usize,
+        L: Send,
+        R: Read,
+        W: Write
+{
+    assert!(threads_num > 0);
+
     if threads_num == 1 {
-        // In case of single thread, wrap both files sequence and bucket
-        // into RefCell to preserve immutable-to-mutable lifetimes transition
-        // In principle, this may be achieved via smth like UnsafeCell (?),
-        // but we don't care that much about performance
-        let files_seq = RefCell::new(files_seq);
-        let fetch_src_dest = move || {
-            files_seq
+        let stream_fn = RefCell::new(stream_fn);
+        let stream_fn = move |thread_id| {
+            stream_fn
                 .try_borrow_mut()
                 .ok()
-                .map(|mut seq| seq.next())
+                .map(|mut inner| inner(thread_id))
                 .flatten()
         };
 
-        let bucket = RefCell::new(TokenBucket::new(speed_limit));
-        let take_tokens = move |amount| {
-            bucket
+        let limiter_fn = RefCell::new(limiter_fn);
+        let limiter_fn = move |amount| {
+            limiter_fn
                 .try_borrow_mut()
                 .ok()
-                .map(|mut bucket| bucket.take(amount))
+                .map(|mut inner| inner(amount))
                 .unwrap_or(0)
         };
-        
-        pull_files(0, &dest_dir, &take_tokens, &fetch_src_dest);
-        return;
-    }
-    // Otherwise, pack files sequence and token bucket under mutex
-    // and run N-1 additional threads
 
-    // To consume this iterator in case of multithreading, we put it under mutex
-    let files_seq = Mutex::new(files_seq);
-    let fetch_src_dest = move || {
-        files_seq
+        copy_streams_thread(0, &stream_fn, &limiter_fn);
+
+        return Ok(());
+    }
+
+    let stream_fn = Mutex::new(stream_fn);
+    let stream_fn = move |thread_id| {
+        stream_fn
             .try_lock()
             .ok()
-            .map(|mut seq| seq.next())
+            .map(|mut inner| inner(thread_id))
             .flatten()
     };
-    // Also, construct token bucket to control download speed
-    // And put it under mutex likewise
-    let bucket = Mutex::new(TokenBucket::new(speed_limit));
-    let take_tokens = move |amount| {
-        bucket
+
+    let limiter_fn = Mutex::new(limiter_fn);
+    let limiter_fn = move |amount| {
+        limiter_fn
             .try_lock()
             .ok()
-            .map(|mut bucket| bucket.take(amount))
+            .map(|mut inner| inner(amount))
             .unwrap_or(0)
     };
-    // Spawn N-1 worker threads and then run processing on current thread too
+
     let _ = scope(|s| {
         for i in 1..threads_num {
-            // A minor annoyance - we need to create separate reference variables
-            // to move them into closure
-            let fetch_src_dest_ref = &fetch_src_dest;
-            let take_tokens_ref = &take_tokens;
-            let dest_dir_ref = &dest_dir;
-            // Create scoped worker thread
-            s.spawn(move |_| pull_files(i, dest_dir_ref, take_tokens_ref, fetch_src_dest_ref));
+            // Create separate references, so that we can move them to scoped thread
+            let thread_id = i;
+            let stream_fn_ref = &stream_fn;
+            let limiter_fn_ref = &limiter_fn;
+
+            s.spawn(move |_| copy_streams_thread(thread_id, stream_fn_ref, limiter_fn_ref));
         }
-        // Main thread would do just the same as worker ones, summing up to N threads
-        pull_files(0, &dest_dir, &take_tokens, &fetch_src_dest);
+
+        copy_streams_thread(0, &stream_fn, &limiter_fn);
     });
+
+    return Ok(());
 }
 
-fn pull_files<'a>(
-    thread_num: usize,
-    dest_dir: &str,
-    bucket: &impl Fn(usize) -> usize,
-    fetch_src_dest: &impl Fn() -> Option<(&'a str, &'a str)>
+fn copy_streams_thread<R: Read, W: Write>(
+    thread_id:  usize,
+    stream_fn:  &impl Fn(usize) -> Option<Result<(R, W)>>,
+    limiter_fn: &impl Fn(usize) -> usize
 ) {
     loop {
         // Retrieve next file in sequence
-        let (url, dest_path) = match fetch_src_dest() {
-            None => break,
-            Some((url, dest)) => (url, Path::new(dest_dir).join(dest)) 
+        let (mut reader, mut writer) = match stream_fn(thread_id) {
+            None             => break,    // No additional jobs
+            Some(Err(_))     => continue, // Failed, maybe need to do additional reporting
+            Some(Ok((r, w))) => (r, w) 
         };
-        println!("#{}: Downloading {} -> {}", thread_num, url, dest_path.display());
-        if let Err(error) = pull_file(url, &dest_path, bucket) {
-            eprintln!("#{}: Failed {} -> {} due to:\n    {}", thread_num, url, dest_path.display(), error);
-        }
-    }
-}
 
-#[derive(Error, Debug)]
-enum DownloadError {
-    #[error("HTTP request error: {0}")]
-    Reqwest(#[from] reqwest::Error),
-    #[error("HTTP request error: code {0}")]
-    StatusCode(reqwest::StatusCode),
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-}
-
-fn pull_file(src_url: &str, dest_path: &Path, bucket: &impl Fn(usize) -> usize) -> Result<(), DownloadError> {
-    let mut response = reqwest::blocking::get(src_url)?;
-    if response.status() != reqwest::StatusCode::OK {
-        return Err(DownloadError::StatusCode(response.status()));
+        let _ = copy_with_speedlimit(&mut reader, &mut writer, &limiter_fn);
     }
-    let mut dest_file = fs::File::create(&dest_path)?;
-    let _ = copy_with_speedlimit(&mut response, &mut dest_file, bucket)?;
-    Ok(())
 }
