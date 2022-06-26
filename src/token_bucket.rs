@@ -1,23 +1,47 @@
 use std::cmp;
 use std::time::{Instant, Duration};
 
+/// A bucket of tokens which renews itself with time
+/// 
+/// Used to generate time-constrained quota for some repeatable process,
+/// like copying data from one stream to another
 pub struct TokenBucket {
+    /// How many tokens are generated per second
     fill_rate: usize,
+    /// Maximum number of tokens in bucket
     capacity:  usize,
+    /// How many tokens remain in bucket, with fraction
     remaining: f64,
+    /// Last time tokens were taken from bucket
     timestamp: Instant,
 }
-
+/// Convert time duration to seconds, with nanoseconds as fraction
 fn duration_seconds(d: Duration) -> f64 {
     (d.as_secs() as f64) + (d.subsec_nanos() as f64) / 1_000_000_000f64
 }
 
 impl TokenBucket {
+    /// Creates new token bucket, with fill rate and capacity set to specified value
+    /// 
+    /// # Arguments
+    /// * rate - value for both fill rate and capacity
     pub fn new(rate: usize) -> TokenBucket {
         TokenBucket::with_capacity(rate, rate)
     }
-
+    /// Creates new token bucket with specified fill rate and capacity
+    /// 
+    /// # Arguments
+    /// * rate - how many tokens are generated per second;
+    ///     set to 0 to make bucket unlimited
+    /// * capacity - how many tokens can bucket hold; can be 0 if fill rate is 0 too
+    /// 
+    /// # Panics
+    /// Panics if rate argument != 0 while capacity == 0
+    /// 
     pub fn with_capacity(rate: usize, capacity: usize) -> TokenBucket {
+        if rate != 0 && capacity == 0 {
+            panic!("Cannot construct token bucket with nonzero rate and zero capacity");
+        }
         TokenBucket {
             fill_rate: rate,
             capacity:  capacity,
@@ -25,7 +49,19 @@ impl TokenBucket {
             timestamp: Instant::now(),
         }
     }
-
+    /// Attempts to take specified amount of tokens from bucket
+    /// 
+    /// # Arguments
+    /// * amount - try to get this many tokens
+    /// 
+    /// # Returns
+    /// Number of tokens actually retrieved
+    /// 
+    /// If fill rate is zero, returns requested amount right away.
+    /// Otherwise, does following:
+    /// * Computes how much time has passed since previous call (or instance construction)
+    /// * Refills bucket storage by fill rate multiplied by delta time, capped by capacity
+    /// * Takes requested amount, but no more than remaining tokens and returns it
     pub fn take(&mut self, amount: usize) -> usize {
         // 0. For zero fillrate, treat this bucket as infinite
         if self.fill_rate == 0 {
