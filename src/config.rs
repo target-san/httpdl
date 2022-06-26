@@ -90,8 +90,23 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_args() {
-        // Generate bunch of directory and file paths which are used in further testing
+    fn parse_simple_success() {
+        let existing_dir = env::current_dir().unwrap();
+        let existing_file = env::current_exe().unwrap();
+        
+        let dir = existing_dir.to_str().unwrap();
+        let file = existing_file.to_str().unwrap();
+        // Simple parsing with both dir and file found and no optional parameters
+        // should result in success with default values
+        assert_args_match!(
+            ["-o", dir, "-f", file],
+            Ok(Config{ dest_dir, list_file, threads_num: 1, speed_limit: 0 })
+                if dest_dir == dir && list_file == file
+        );
+    }
+
+    #[test]
+    fn required_params_failures() {
         let existing_dir = env::current_dir().unwrap();
         let nonexistent_dir = existing_dir.join("this-directory-does-not-exist");
         let existing_file = env::current_exe().unwrap();
@@ -101,13 +116,6 @@ mod tests {
         let no_dir = nonexistent_dir.to_str().unwrap();
         let file = existing_file.to_str().unwrap();
         let no_file = nonexistent_file.to_str().unwrap();
-        // Simple parsing with both dir and file found and no optional parameters
-        // should result in success with default values
-        assert_args_match!(
-            ["-o", dir, "-f", file],
-            Ok(Config{ dest_dir, list_file, threads_num: 1, speed_limit: 0 })
-                if dest_dir == dir && list_file == file
-        );
         // Missing one or both required parameters
         assert_args_match!([], Err(_));
         assert_args_match!(["-o", dir], Err(_));
@@ -116,20 +124,43 @@ mod tests {
         assert_args_match!(["-o", no_dir, "-f", no_file], Err(_));
         assert_args_match!(["-o", no_dir, "-f", file], Err(_));
         assert_args_match!(["-o", dir, "-f", no_file], Err(_));
+    }
+
+    #[test]
+    fn threads_num_failures() {
+        let existing_dir = env::current_dir().unwrap();
+        let existing_file = env::current_exe().unwrap();
+        
+        let dir = existing_dir.to_str().unwrap();
+        let file = existing_file.to_str().unwrap();
         // threads_num - main failure cases
         assert_args_match!(["-o", dir, "-f", file, "-n", "0"], Err(_));
         assert_args_match!(["-o", dir, "-f", file, "-n", "-1"], Err(_));
         assert_args_match!(["-o", dir, "-f", file, "-n", ""], Err(_));
         assert_args_match!(["-o", dir, "-f", file, "-n", "abc"], Err(_));
+    }
+
+    #[test]
+    fn threads_num_successes() {
+        let existing_dir = env::current_dir().unwrap();
+        let existing_file = env::current_exe().unwrap();
+        
+        let dir = existing_dir.to_str().unwrap();
+        let file = existing_file.to_str().unwrap();
         // threads_num - several success cases
         assert_args_match!(["-o", dir, "-f", file, "-n", "1"], Ok(Config{ threads_num: 1, .. }));
         assert_args_match!(["-o", dir, "-f", file, "-n", "2"], Ok(Config{ threads_num: 2, .. }));
         assert_args_match!(["-o", dir, "-f", file, "-n", "4"], Ok(Config{ threads_num: 4, .. }));
         assert_args_match!(["-o", dir, "-f", file, "-n", "7"], Ok(Config{ threads_num: 7, .. }));
-        // speed_limit - simple failure cases
-        assert_args_match!(["-o", dir, "-f", file, "-l", "-1"], Err(_));
-        assert_args_match!(["-o", dir, "-f", file, "-l", ""], Err(_));
-        assert_args_match!(["-o", dir, "-f", file, "-l", "abc"], Err(_));
+    }
+
+    #[test]
+    fn speed_limit_successes() {
+        let existing_dir = env::current_dir().unwrap();
+        let existing_file = env::current_exe().unwrap();
+        
+        let dir = existing_dir.to_str().unwrap();
+        let file = existing_file.to_str().unwrap();
         // speed_limit - simple success cases
         assert_args_match!(["-o", dir, "-f", file, "-l", "0"], Ok(Config{ speed_limit: 0, .. }));
         assert_args_match!(["-o", dir, "-f", file, "-l", "1"], Ok(Config{ speed_limit: 1, .. }));
@@ -174,6 +205,19 @@ mod tests {
             ["-o", dir, "-f", file, "-l", "2M"],
             Ok(Config{ speed_limit: s, .. }) if s == 2*1_024*1_024
         );
+    }
+
+    #[test]
+    fn speed_limit_failures() {
+        let existing_dir = env::current_dir().unwrap();
+        let existing_file = env::current_exe().unwrap();
+
+        let dir = existing_dir.to_str().unwrap();
+        let file = existing_file.to_str().unwrap();
+        // speed_limit - simple failure cases
+        assert_args_match!(["-o", dir, "-f", file, "-l", "-1"], Err(_));
+        assert_args_match!(["-o", dir, "-f", file, "-l", ""], Err(_));
+        assert_args_match!(["-o", dir, "-f", file, "-l", "abc"], Err(_));
         // Check failure on unknown suffix
         assert_args_match!(["-o", dir, "-f", file, "-l", "2u"], Err(_));
     }
