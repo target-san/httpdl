@@ -2,7 +2,6 @@
 // Uses from stdlib
 //
 use std::path::Path;
-use std::io::ErrorKind;
 use std::sync::{Mutex, Arc};
 //
 // Uses from external crates
@@ -11,9 +10,8 @@ use anyhow::Result;
 use clap::Parser;
 use tokio_util::io::StreamReader;
 use tokio::fs;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::spawn;
-use tokio::task::yield_now;
 use reqwest::Client;
 use futures::TryStreamExt as _;
 //
@@ -24,6 +22,9 @@ use token_bucket::TokenBucket;
 
 mod config;
 use config::Config;
+
+mod copy_with_speedlimit;
+use copy_with_speedlimit::copy_with_speedlimit;
 
 // Program starting point, as usual
 #[tokio::main]
@@ -123,34 +124,4 @@ async fn download_file(
     dest_file.flush().await?;
 
     Ok(())
-}
-
-async fn copy_with_speedlimit<R, W, L>(
-    reader:  &mut R,
-    writer:  &mut W,
-    limiter: &L
-) -> Result<u64>
-    where
-        R: AsyncRead + Unpin + ?Sized,
-        W: AsyncWrite + Unpin + ?Sized,
-        L: Fn(usize) -> usize
-{
-    let mut buf = [0u8; 8 * 1_024];
-    let mut written = 0u64;
-    loop {
-        let limit = limiter(buf.len()).min(buf.len());
-        if limit == 0 {
-            yield_now().await;
-            continue;
-        }
-        let part = &mut buf[..limit];
-        let len = match reader.read(part).await {
-            Ok(0) => return Ok(written),
-            Ok(len) => len,
-            Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
-            Err(e) => Err(e)?,
-        };
-        writer.write_all(&mut part[..len]).await?;
-        written += len as u64;
-    }
 }
