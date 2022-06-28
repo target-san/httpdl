@@ -2,19 +2,25 @@
 // Uses from stdlib
 //
 use std::path::Path;
+use std::io::ErrorKind;
+use std::sync::{Mutex, Arc};
 //
 // Uses from external crates
 //
 use anyhow::Result;
 use clap::Parser;
+use tokio_util::io::StreamReader;
 use tokio::fs;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::spawn;
+use tokio::task::yield_now;
 use reqwest::Client;
+use futures::TryStreamExt as _;
 //
 // Submodules
 //
 mod token_bucket;
+use token_bucket::TokenBucket;
 
 mod config;
 use config::Config;
@@ -49,6 +55,7 @@ async fn main() -> Result<()> {
         })
         .fuse();
 
+    let bucket = Arc::new(Mutex::new(TokenBucket::new(speed_limit)));
     let dest_dir = Path::new(&dest_dir);
     let client = Client::new();
 
@@ -57,6 +64,14 @@ async fn main() -> Result<()> {
         let dest_path = dest_dir.join(dest_file_str);
         let client = client.clone();
         let i = i;  // Dupe loop counter into local scope
+        let bucket = bucket.clone();
+        let limiter = move |amount| {
+            bucket
+                .try_lock()
+                .ok()
+                .map(|mut inner| inner.take(amount))
+                .unwrap_or(0)
+        };
 
         spawn(async move {
             println!(
@@ -65,7 +80,7 @@ async fn main() -> Result<()> {
                 src_url,
                 dest_path.file_name().and_then(|name| name.to_str()).unwrap_or("")
             );
-            match download_and_write(client, src_url.clone(), &dest_path).await {
+            match download_file(client, src_url.clone(), &dest_path, &limiter).await {
                 Ok(_) => println!(
                     "#{}: Completed {} -> {}",
                     i,
@@ -86,23 +101,56 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn download_and_write(
-    client: Client,
-    src_url: impl reqwest::IntoUrl,
-    dest_path: impl AsRef<Path>
+async fn download_file(
+    client:     Client,
+    src_url:    impl reqwest::IntoUrl,
+    dest_path:  impl AsRef<Path>,
+    limiter:   &impl Fn(usize) -> usize
 ) -> Result<()> { 
-    let mut src_body = client.get(src_url).send().await?;
+    // HTTP client makes request, response body is converted into AsyncRead object
+    let src_body = client.get(src_url).send().await?.bytes_stream();
+    let mut src_body = StreamReader::new(
+        src_body.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    );
+    // Create destination file and obtain buffered writer around it
     let dest_file = fs::File::create(dest_path).await?;
     let mut dest_file = BufWriter::new(dest_file);
-
-    // Do an asynchronous, buffered copy of the download to the output file
-    while let Some(chunk) = src_body.chunk().await? {
-        dest_file.write(&chunk).await?;
-    }
-    
+    // Perform actual copying via async version of copy_with_speedlimit
+    copy_with_speedlimit(&mut src_body, &mut dest_file, &limiter).await?;
     // Must flush tokio::io::BufWriter manually.
     // It will *not* flush itself automatically when dropped.
+    // This note was obtained from one of hyper's issue threads
     dest_file.flush().await?;
 
     Ok(())
+}
+
+async fn copy_with_speedlimit<R, W, L>(
+    reader:  &mut R,
+    writer:  &mut W,
+    limiter: &L
+) -> Result<u64>
+    where
+        R: AsyncRead + Unpin + ?Sized,
+        W: AsyncWrite + Unpin + ?Sized,
+        L: Fn(usize) -> usize
+{
+    let mut buf = [0u8; 8 * 1_024];
+    let mut written = 0u64;
+    loop {
+        let limit = limiter(buf.len()).min(buf.len());
+        if limit == 0 {
+            yield_now().await;
+            continue;
+        }
+        let part = &mut buf[..limit];
+        let len = match reader.read(part).await {
+            Ok(0) => return Ok(written),
+            Ok(len) => len,
+            Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) => Err(e)?,
+        };
+        writer.write_all(&mut part[..len]).await?;
+        written += len as u64;
+    }
 }
