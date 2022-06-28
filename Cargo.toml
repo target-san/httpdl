@@ -7,7 +7,6 @@ edition     = "2021"
 
 [dependencies]
 clap            = { version = "3.2.6", features = [ "derive" ] }
-thiserror       = "1.0.31"
 anyhow          = "1.0.58"
 reqwest         = { version = "0.11.11", features = [ "multipart", "blocking" ] }
 crossbeam-utils = "0.8.10"
