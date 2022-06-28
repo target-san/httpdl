@@ -5,7 +5,6 @@ use std::cell::RefCell;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::process::exit;
 use std::sync::Mutex;
 //
 // Uses from external crates
@@ -26,25 +25,16 @@ mod copy_with_speedlimit;
 use copy_with_speedlimit::copy_with_speedlimit;
 
 // Program starting point, as usual
-fn main() {
+fn main() -> Result<()> {
     // First, parse arguments
-    let Config { dest_dir, list_file, threads_num, speed_limit } = Config::parse();
+    let Config { dest_dir, list_file, threads_num, speed_limit } = Config::try_parse()?;
     // Now, we read whole list file and then fill files mapping
     let all_text = {
         // Open file with list of files to download
-        let mut fd = match fs::File::open(&list_file) {
-            Ok(val) => val,
-            Err(err)  => {
-                eprintln!("Failed to open {}: {}", list_file, err);
-                exit(1)
-            }
-        };
+        let mut fd = fs::File::open(&list_file)?;
         // Then read all of its contents into buffer
         let mut text = String::new();
-        if let Err(err) = fd.read_to_string(&mut text) {
-            eprintln!("Failed to read contents of {}: {}", list_file, err);
-            exit(1)
-        }
+        fd.read_to_string(&mut text)?;
         text
     };
     // Next, we split the whole file into lines in-place
@@ -79,6 +69,8 @@ fn main() {
         },
         move |amount| bucket.take(amount)
     );
+
+    Ok(())
 }
 
 fn copy_streams<F, L, R, W>(threads_num: usize, stream_fn: F, limiter_fn: L) -> Result<()>
