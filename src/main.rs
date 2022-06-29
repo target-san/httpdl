@@ -11,9 +11,8 @@ use clap::Parser;
 use tokio_util::io::StreamReader;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
-use tokio::spawn;
 use reqwest::Client;
-use futures::TryStreamExt as _;
+use futures::{StreamExt as _, TryStreamExt as _};
 //
 // Submodules
 //
@@ -53,45 +52,62 @@ async fn main() -> Result<()> {
         })
         .fuse();
 
-    download_files(files_seq, Path::new(&dest_dir), threads_num, speed_limit).await
+    download_files(files_seq, Path::new(&dest_dir), threads_num, speed_limit).await;
+
+    Ok(())
 }
 
 async fn download_files<'a>(
     files:          impl Iterator<Item = (&'a str, &'a str)>,
     dest_dir:       impl AsRef<Path>,
-    _threads_num:   usize,
+    threads_num:    usize,
     speed_limit:    usize
-) -> Result<()> {
+) {
     let bucket = Arc::new(Mutex::new(TokenBucket::new(speed_limit)));
     let client = Client::new();
 
-    for (i, (url_str, dest_file_str)) in files.enumerate() {
-        let src_url = url::Url::parse(url_str)?;
-        let dest_path = dest_dir.as_ref().join(dest_file_str);
-        let client = client.clone();
-        let i = i;  // Dupe loop counter into local scope
-        let bucket = bucket.clone();
-        let limiter = move |amount| {
-            bucket
-                .try_lock()
-                .ok()
-                .map(|mut inner| inner.take(amount))
-                .unwrap_or(0)
-        };
+    let files = futures::stream::iter(files.enumerate());
 
-        spawn(async move {
-            let dest_name = dest_path.file_name().and_then(|name| name.to_str()).unwrap_or("");
-            println!("#{}: Started {} -> {}", i, src_url, dest_name);
-            match download_file(client, src_url.clone(), &dest_path, &limiter).await {
+    files
+        .map(|(i, (url_str, name_str))| {
+            println!("#{}: Started {} -> {}", i, url_str, name_str);
+            
+            let src_url   = url_str.to_string();
+            let dest_path = dest_dir.as_ref().join(name_str);
+            
+            let client = client.clone();
+            // Construct separate avatar of token bucket for each task
+            let bucket = bucket.clone();
+            let limiter = move |amount| {
+                bucket
+                    .try_lock()
+                    .ok()
+                    .map(|mut inner| inner.take(amount))
+                    .unwrap_or(0)
+            };
+        
+            async move {
+                let result = download_file(client, &src_url, &dest_path, &limiter).await;
+
+                (i, src_url, dest_path, result)
+            }
+        })
+        .buffer_unordered(threads_num)
+        .for_each(|(i, src_url, dest_path, result)| async move {
+            let dest_name = dest_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            
+            match result {
                 Ok(_) =>
                     println!("#{}: Completed {} -> {}", i, src_url, dest_name ),
                 Err(err) =>
                     eprintln!("#{}: Failed {} -> {}: {}", i, src_url, dest_name, err),
             }
-        });
-    }
-
-    Ok(())
+        })
+        .await
+    ;
 }
 
 async fn download_file(
@@ -112,7 +128,7 @@ async fn download_file(
     copy_with_speedlimit(&mut src_body, &mut dest_file, &limiter).await?;
     // Must flush tokio::io::BufWriter manually.
     // It will *not* flush itself automatically when dropped.
-    // This note was obtained from one of hyper's issue threads
+    // Obtained from: https://github.com/seanmonstar/reqwest/issues/482#issuecomment-584245674
     dest_file.flush().await?;
 
     Ok(())
