@@ -8,14 +8,13 @@ use clap::Parser;
 /// Contains execution parameters and provides their parsing from application's CLI arguments
 #[derive(Parser, Debug)]
 #[clap(author, version, about)]
-pub struct Config
-{
+pub struct Config {
     #[clap(short = 'o', value_parser = parse_dest_dir)]
     /// Destination directory where to store downloaded files
-    pub dest_dir:    String,
+    pub dest_dir: String,
     #[clap(short = 'f', value_parser = parse_list_file_path)]
     /// File which contains list of URLs to download and local names for files
-    pub list_file:   String,
+    pub list_file: String,
     #[clap(short = 'n', value_parser = parse_threads_num, default_value_t = 1)]
     /// Number of worker threads to use
     pub threads_num: usize,
@@ -31,8 +30,7 @@ pub struct Config
 fn parse_dest_dir(arg: &str) -> Result<String> {
     if fs::metadata(arg)?.is_dir() {
         Ok(arg.to_owned())
-    }
-    else {
+    } else {
         bail!("{}: not a directory", arg)
     }
 }
@@ -40,8 +38,7 @@ fn parse_dest_dir(arg: &str) -> Result<String> {
 fn parse_list_file_path(arg: &str) -> Result<String> {
     if fs::metadata(arg)?.is_file() {
         Ok(arg.to_owned())
-    }
-    else {
+    } else {
         bail!("{}: not a file", arg)
     }
 }
@@ -50,8 +47,7 @@ fn parse_threads_num(arg: &str) -> Result<usize> {
     let num = usize::from_str(arg)?;
     if num != 0 {
         Ok(num)
-    }
-    else {
+    } else {
         bail!("Expected number > 0")
     }
 }
@@ -64,12 +60,16 @@ fn parse_speed_limit(arg: &str) -> Result<usize> {
             let mult: usize = match last_char {
                 'k' | 'K' => 1024,
                 'm' | 'M' => 1024 * 1024,
-                _ => 1
+                _ => 1,
             };
             // Next, get actual number string based on multiplier being recognized or not
-            let num_str = if mult == 1 { arg } else { arg.split_at(last_index).0 };
+            let num_str = if mult == 1 {
+                arg
+            } else {
+                arg.split_at(last_index).0
+            };
             // We could map error, but it's also possible to use '?'
-            // and simply return result wrapped into Ok 
+            // and simply return result wrapped into Ok
             Ok(usize::from_str(num_str).map(|n| n * mult)?)
         }
     }
@@ -77,10 +77,10 @@ fn parse_speed_limit(arg: &str) -> Result<usize> {
 
 #[cfg(test)]
 mod tests {
-    use std::env;
-    use clap::Parser;
     use super::Config;
     use assert_matches::assert_matches;
+    use clap::Parser;
+    use std::env;
 
     // Macro which shortens matching assertion expression
     macro_rules! assert_args_match {
@@ -93,7 +93,7 @@ mod tests {
     fn parse_simple_success() {
         let existing_dir = env::current_dir().unwrap();
         let existing_file = env::current_exe().unwrap();
-        
+
         let dir = existing_dir.to_str().unwrap();
         let file = existing_file.to_str().unwrap();
         // Simple parsing with both dir and file found and no optional parameters
@@ -130,7 +130,7 @@ mod tests {
     fn threads_num_failures() {
         let existing_dir = env::current_dir().unwrap();
         let existing_file = env::current_exe().unwrap();
-        
+
         let dir = existing_dir.to_str().unwrap();
         let file = existing_file.to_str().unwrap();
         // threads_num - main failure cases
@@ -144,34 +144,76 @@ mod tests {
     fn threads_num_successes() {
         let existing_dir = env::current_dir().unwrap();
         let existing_file = env::current_exe().unwrap();
-        
+
         let dir = existing_dir.to_str().unwrap();
         let file = existing_file.to_str().unwrap();
         // threads_num - several success cases
-        assert_args_match!(["-o", dir, "-f", file, "-n", "1"], Ok(Config{ threads_num: 1, .. }));
-        assert_args_match!(["-o", dir, "-f", file, "-n", "2"], Ok(Config{ threads_num: 2, .. }));
-        assert_args_match!(["-o", dir, "-f", file, "-n", "4"], Ok(Config{ threads_num: 4, .. }));
-        assert_args_match!(["-o", dir, "-f", file, "-n", "7"], Ok(Config{ threads_num: 7, .. }));
+        assert_args_match!(
+            ["-o", dir, "-f", file, "-n", "1"],
+            Ok(Config { threads_num: 1, .. })
+        );
+        assert_args_match!(
+            ["-o", dir, "-f", file, "-n", "2"],
+            Ok(Config { threads_num: 2, .. })
+        );
+        assert_args_match!(
+            ["-o", dir, "-f", file, "-n", "4"],
+            Ok(Config { threads_num: 4, .. })
+        );
+        assert_args_match!(
+            ["-o", dir, "-f", file, "-n", "7"],
+            Ok(Config { threads_num: 7, .. })
+        );
     }
 
     #[test]
     fn speed_limit_successes() {
         let existing_dir = env::current_dir().unwrap();
         let existing_file = env::current_exe().unwrap();
-        
+
         let dir = existing_dir.to_str().unwrap();
         let file = existing_file.to_str().unwrap();
         // speed_limit - simple success cases
-        assert_args_match!(["-o", dir, "-f", file, "-l", "0"], Ok(Config{ speed_limit: 0, .. }));
-        assert_args_match!(["-o", dir, "-f", file, "-l", "1"], Ok(Config{ speed_limit: 1, .. }));
-        assert_args_match!(["-o", dir, "-f", file, "-l", "1000"], Ok(Config{ speed_limit: 1_000, .. }));
-        assert_args_match!(["-o", dir, "-f", file, "-l", "1000000"], Ok(Config{ speed_limit: 1_000_000, .. }));
+        assert_args_match!(
+            ["-o", dir, "-f", file, "-l", "0"],
+            Ok(Config { speed_limit: 0, .. })
+        );
+        assert_args_match!(
+            ["-o", dir, "-f", file, "-l", "1"],
+            Ok(Config { speed_limit: 1, .. })
+        );
+        assert_args_match!(
+            ["-o", dir, "-f", file, "-l", "1000"],
+            Ok(Config {
+                speed_limit: 1_000,
+                ..
+            })
+        );
+        assert_args_match!(
+            ["-o", dir, "-f", file, "-l", "1000000"],
+            Ok(Config {
+                speed_limit: 1_000_000,
+                ..
+            })
+        );
         // speed_limit - suffix parse successes
-        assert_args_match!(["-o", dir, "-f", file, "-l", "0k"], Ok(Config{ speed_limit: 0, .. }));
-        assert_args_match!(["-o", dir, "-f", file, "-l", "0K"], Ok(Config{ speed_limit: 0, .. }));
-        assert_args_match!(["-o", dir, "-f", file, "-l", "0m"], Ok(Config{ speed_limit: 0, .. }));
-        assert_args_match!(["-o", dir, "-f", file, "-l", "0M"], Ok(Config{ speed_limit: 0, .. }));
-        
+        assert_args_match!(
+            ["-o", dir, "-f", file, "-l", "0k"],
+            Ok(Config { speed_limit: 0, .. })
+        );
+        assert_args_match!(
+            ["-o", dir, "-f", file, "-l", "0K"],
+            Ok(Config { speed_limit: 0, .. })
+        );
+        assert_args_match!(
+            ["-o", dir, "-f", file, "-l", "0m"],
+            Ok(Config { speed_limit: 0, .. })
+        );
+        assert_args_match!(
+            ["-o", dir, "-f", file, "-l", "0M"],
+            Ok(Config { speed_limit: 0, .. })
+        );
+
         assert_args_match!(
             ["-o", dir, "-f", file, "-l", "1k"],
             Ok(Config{ speed_limit: s, .. }) if s == 1_024
@@ -188,7 +230,7 @@ mod tests {
             ["-o", dir, "-f", file, "-l", "1M"],
             Ok(Config{ speed_limit: s, .. }) if s == 1_024*1_024
         );
-        
+
         assert_args_match!(
             ["-o", dir, "-f", file, "-l", "2k"],
             Ok(Config{ speed_limit: s, .. }) if s == 2*1_024
