@@ -1,18 +1,18 @@
 //
 // Uses from stdlib
 //
-use std::cell::RefCell;
-use std::fs;
-use std::io::Read;
 use std::path::Path;
-use std::process::exit;
-use std::sync::Mutex;
+use std::sync::{Mutex, Arc};
 //
 // Uses from external crates
 //
+use anyhow::Result;
 use clap::Parser;
-use crossbeam_utils::thread::scope;
-use thiserror::Error;
+use tokio_util::io::StreamReader;
+use tokio::fs;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
+use reqwest::Client;
+use futures::{StreamExt as _, TryStreamExt as _};
 //
 // Submodules
 //
@@ -26,25 +26,17 @@ mod copy_with_speedlimit;
 use copy_with_speedlimit::copy_with_speedlimit;
 
 // Program starting point, as usual
-fn main() {
+#[tokio::main]
+async fn main() -> Result<()> {
     // First, parse arguments
-    let Config { dest_dir, list_file, threads_num, speed_limit } = Config::parse();
+    let Config { dest_dir, list_file, threads_num, speed_limit } = Config::try_parse()?;
     // Now, we read whole list file and then fill files mapping
     let all_text = {
         // Open file with list of files to download
-        let mut fd = match fs::File::open(&list_file) {
-            Ok(val) => val,
-            Err(err)  => {
-                eprintln!("Failed to open {}: {}", list_file, err);
-                exit(1)
-            }
-        };
+        let mut fd = fs::File::open(&list_file).await?;
         // Then read all of its contents into buffer
         let mut text = String::new();
-        if let Err(err) = fd.read_to_string(&mut text) {
-            eprintln!("Failed to read contents of {}: {}", list_file, err);
-            exit(1)
-        }
+        fd.read_to_string(&mut text).await?;
         text
     };
     // Next, we split the whole file into lines in-place
@@ -54,114 +46,183 @@ fn main() {
         .lines()
         .filter_map(|line| {
             let mut pieces = line.split(|c| " \r\n\t".contains(c)).filter(|s| !s.is_empty());
-            let url = pieces.next();
-            let filename = pieces.next();
-            if let (Some(url_value), Some(fname_value)) = (url, filename) {
-                Some((url_value, fname_value))
-            }
-            else { None }
+            let url = pieces.next()?;
+            let filename = pieces.next()?;
+            Some((url, filename))
         })
         .fuse();
-    // If number of threads is 1, use non-threaded version
-    if threads_num == 1 {
-        // In case of single thread, wrap both files sequence and bucket
-        // into RefCell to preserve immutable-to-mutable lifetimes transition
-        // In principle, this may be achieved via smth like UnsafeCell (?),
-        // but we don't care that much about performance
-        let files_seq = RefCell::new(files_seq);
-        let fetch_src_dest = move || {
-            files_seq
-                .try_borrow_mut()
-                .ok()
-                .map(|mut seq| seq.next())
-                .flatten()
-        };
 
-        let bucket = RefCell::new(TokenBucket::new(speed_limit));
-        let take_tokens = move |amount| {
-            bucket
-                .try_borrow_mut()
-                .ok()
-                .map(|mut bucket| bucket.take(amount))
-                .unwrap_or(0)
-        };
-        
-        pull_files(0, &dest_dir, &take_tokens, &fetch_src_dest);
-        return;
-    }
-    // Otherwise, pack files sequence and token bucket under mutex
-    // and run N-1 additional threads
+    download_files(files_seq, Path::new(&dest_dir), threads_num, speed_limit).await;
 
-    // To consume this iterator in case of multithreading, we put it under mutex
-    let files_seq = Mutex::new(files_seq);
-    let fetch_src_dest = move || {
-        files_seq
-            .try_lock()
-            .ok()
-            .map(|mut seq| seq.next())
-            .flatten()
-    };
-    // Also, construct token bucket to control download speed
-    // And put it under mutex likewise
-    let bucket = Mutex::new(TokenBucket::new(speed_limit));
-    let take_tokens = move |amount| {
-        bucket
-            .try_lock()
-            .ok()
-            .map(|mut bucket| bucket.take(amount))
-            .unwrap_or(0)
-    };
-    // Spawn N-1 worker threads and then run processing on current thread too
-    let _ = scope(|s| {
-        for i in 1..threads_num {
-            // A minor annoyance - we need to create separate reference variables
-            // to move them into closure
-            let fetch_src_dest_ref = &fetch_src_dest;
-            let take_tokens_ref = &take_tokens;
-            let dest_dir_ref = &dest_dir;
-            // Create scoped worker thread
-            s.spawn(move |_| pull_files(i, dest_dir_ref, take_tokens_ref, fetch_src_dest_ref));
-        }
-        // Main thread would do just the same as worker ones, summing up to N threads
-        pull_files(0, &dest_dir, &take_tokens, &fetch_src_dest);
-    });
-}
-
-fn pull_files<'a>(
-    thread_num: usize,
-    dest_dir: &str,
-    bucket: &impl Fn(usize) -> usize,
-    fetch_src_dest: &impl Fn() -> Option<(&'a str, &'a str)>
-) {
-    loop {
-        // Retrieve next file in sequence
-        let (url, dest_path) = match fetch_src_dest() {
-            None => break,
-            Some((url, dest)) => (url, Path::new(dest_dir).join(dest)) 
-        };
-        println!("#{}: Downloading {} -> {}", thread_num, url, dest_path.display());
-        if let Err(error) = pull_file(url, &dest_path, bucket) {
-            eprintln!("#{}: Failed {} -> {} due to:\n    {}", thread_num, url, dest_path.display(), error);
-        }
-    }
-}
-
-#[derive(Error, Debug)]
-enum DownloadError {
-    #[error("HTTP request error: {0}")]
-    Reqwest(#[from] reqwest::Error),
-    #[error("HTTP request error: code {0}")]
-    StatusCode(reqwest::StatusCode),
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-}
-
-fn pull_file(src_url: &str, dest_path: &Path, bucket: &impl Fn(usize) -> usize) -> Result<(), DownloadError> {
-    let mut response = reqwest::blocking::get(src_url)?;
-    if response.status() != reqwest::StatusCode::OK {
-        return Err(DownloadError::StatusCode(response.status()));
-    }
-    let mut dest_file = fs::File::create(&dest_path)?;
-    let _ = copy_with_speedlimit(&mut response, &mut dest_file, bucket)?;
     Ok(())
+}
+
+async fn download_files<'a>(
+    files:          impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
+    dest_dir:       impl AsRef<Path>,
+    threads_num:    usize,
+    speed_limit:    usize
+) {
+    let bucket = Arc::new(Mutex::new(TokenBucket::new(speed_limit)));
+    let client = Client::new();
+
+    let files = futures::stream::iter(files.into_iter().enumerate());
+
+    files
+        .map(|(i, (url_str, name_str))| {
+            let url_str = url_str.as_ref();
+            let name_str = name_str.as_ref();
+            println!("#{}: Started {} -> {}", i, url_str, name_str);
+            
+            let src_url   = url_str.to_string();
+            let dest_path = dest_dir.as_ref().join(name_str);
+            
+            let client = client.clone();
+            // Construct separate avatar of token bucket for each task
+            let bucket = bucket.clone();
+            let limiter = move |amount| {
+                bucket
+                    .try_lock()
+                    .ok()
+                    .map(|mut inner| inner.take(amount))
+                    .unwrap_or(0)
+            };
+        
+            async move {
+                let result = download_file(client, &src_url, &dest_path, &limiter).await;
+
+                (i, src_url, dest_path, result)
+            }
+        })
+        .buffer_unordered(threads_num)
+        .for_each(|(i, src_url, dest_path, result)| async move {
+            let dest_name = dest_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            
+            match result {
+                Ok(_) =>
+                    println!("#{}: Completed {} -> {}", i, src_url, dest_name ),
+                Err(err) =>
+                    eprintln!("#{}: Failed {} -> {}: {}", i, src_url, dest_name, err),
+            }
+        })
+        .await
+    ;
+}
+
+async fn download_file(
+    client:     Client,
+    src_url:    impl reqwest::IntoUrl,
+    dest_path:  impl AsRef<Path>,
+    limiter:   &impl Fn(usize) -> usize
+) -> Result<()> { 
+    // HTTP client makes request, response body is converted into AsyncRead object
+    let src_body = client.get(src_url).send().await?.bytes_stream();
+    let mut src_body = StreamReader::new(
+        src_body.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    );
+    // Create destination file and obtain buffered writer around it
+    let dest_file = fs::File::create(dest_path).await?;
+    let mut dest_file = BufWriter::new(dest_file);
+    // Perform actual copying via async version of copy_with_speedlimit
+    copy_with_speedlimit(&mut src_body, &mut dest_file, &limiter).await?;
+    // Must flush tokio::io::BufWriter manually.
+    // It will *not* flush itself automatically when dropped.
+    // Obtained from: https://github.com/seanmonstar/reqwest/issues/482#issuecomment-584245674
+    dest_file.flush().await?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::copy_with_speedlimit::BUFFER_SIZE;
+    use rand::{thread_rng, RngCore};
+    use warp::Filter;
+    use std::io::{BufWriter, Write, Read};
+    use std::fs::File;
+    use tokio::task::spawn;
+    use tokio::runtime::Builder;
+    use tokio::sync::oneshot::channel;
+
+    #[test]
+    fn successful_downloads() {
+        // NB: Yes, I know that testing of private APIs is considered bad practice.
+        // ATM download_files is the closest thing to pub api we have.
+        // I also have plans to move download procedure into library,
+        // so it seems fine in this particular situation
+        let src_dir = tempfile::tempdir().unwrap();
+        // List of sample file sizes, also used as their names
+        let sample_files = [
+            0,
+            10,
+            BUFFER_SIZE - 1,
+            BUFFER_SIZE,
+            BUFFER_SIZE + 1,
+            BUFFER_SIZE * 2,
+            BUFFER_SIZE * 256
+        ];
+        // Generate sample files in source directory
+        (&sample_files)
+            .map(|size| {
+                // Generate 
+                let mut buf = vec![0u8; size];
+                thread_rng().fill_bytes(&mut buf);
+
+                let file = File::create(src_dir.path().join(size.to_string())).unwrap();
+                let mut file = BufWriter::new(file);
+
+                file.write_all(&buf).unwrap();
+                file.flush().unwrap();
+            })
+        ;
+        // Generate parameters for files download
+        let src_path = src_dir.path().to_owned();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let dl_names = (&sample_files).map(|size| size.to_string());
+        // Perform async download, with local stub server running
+        Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                // Routes for all files in source test directory
+                let routes = warp::path("files").and(warp::fs::dir(src_path.clone()));
+                // Construct shutdown channel
+                let (tx, rx) = channel();
+                // Construct server future
+                let (addr, server) = warp::serve(routes)
+                    .bind_with_graceful_shutdown(
+                        ([127, 0, 0, 1], 0),
+                        async {
+                            rx.await.ok();
+                        }
+                    );
+                // Spawn the server into a runtime
+                let jh = spawn(server);
+                // Download files in question
+                let files = dl_names
+                    .map(|name| (
+                        format!("http://127.0.0.1:{}/files/{}", addr.port(), name),
+                        name)
+                    );
+                // Simple single-threaded unbounded download
+                super::download_files(files.iter().map(|(url, name)| (url, name)), &dest_dir, 1, 0).await;
+                // Validate files in dest_dir against same files in src_dir
+                for (_, name) in &files {
+                    let mut src_data = Vec::new();
+                    File::open(src_path.join(name)).unwrap().read_to_end(&mut src_data).unwrap();
+                    
+                    let mut dest_data = Vec::new();
+                    File::open(dest_dir.path().join(name)).unwrap().read_to_end(&mut dest_data).unwrap();
+
+                    assert_eq!(src_data, dest_data);
+                }
+                // At the end, send shutdown signal and wait for termination
+                let _ = tx.send(());
+                let _ = jh.await;
+            });
+    }
 }

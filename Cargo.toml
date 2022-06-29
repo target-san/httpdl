@@ -1,17 +1,23 @@
 [package]
 name        = "httpdl"
-version     = "0.4.1"
+version     = "0.5.0"
 authors     = ["Igor Baidiuk <target.san@gmail.com>"]
 description = "A simple HTTP file downloader. Supports specifying number of threads and limiting download speed"
 edition     = "2021"
 
 [dependencies]
 clap            = { version = "3.2.6", features = [ "derive" ] }
-thiserror       = "1.0.31"
 anyhow          = "1.0.58"
-reqwest         = { version = "0.11.11", features = [ "multipart", "blocking" ] }
+reqwest         = { version = "0.11.11", features = [ "stream" ] }
 crossbeam-utils = "0.8.10"
+tokio           = { version = "1.19.2", features = ["macros", "rt-multi-thread", "net", "fs"] }
+url             = "2.2.2"
+tokio-util      = { version = "0.7.3", features = ["compat"] }
+futures         = "0.3.21"
 
 [dev-dependencies]
 assert_matches  = "1.5.0"
 rand            = "0.8.5"
+tempfile = "3.3.0"
+tokio-test      = "0.4.2"
+warp            = "0.3.2"
