@@ -47,22 +47,27 @@ async fn main() -> Result<()> {
         .lines()
         .filter_map(|line| {
             let mut pieces = line.split(|c| " \r\n\t".contains(c)).filter(|s| !s.is_empty());
-            let url = pieces.next();
-            let filename = pieces.next();
-            if let (Some(url_value), Some(fname_value)) = (url, filename) {
-                Some((url_value, fname_value))
-            }
-            else { None }
+            let url = pieces.next()?;
+            let filename = pieces.next()?;
+            Some((url, filename))
         })
         .fuse();
 
+    download_files(files_seq, Path::new(&dest_dir), threads_num, speed_limit).await
+}
+
+async fn download_files<'a>(
+    files:          impl Iterator<Item = (&'a str, &'a str)>,
+    dest_dir:       impl AsRef<Path>,
+    _threads_num:   usize,
+    speed_limit:    usize
+) -> Result<()> {
     let bucket = Arc::new(Mutex::new(TokenBucket::new(speed_limit)));
-    let dest_dir = Path::new(&dest_dir);
     let client = Client::new();
 
-    for (i, (url_str, dest_file_str)) in files_seq.enumerate() {
+    for (i, (url_str, dest_file_str)) in files.enumerate() {
         let src_url = url::Url::parse(url_str)?;
-        let dest_path = dest_dir.join(dest_file_str);
+        let dest_path = dest_dir.as_ref().join(dest_file_str);
         let client = client.clone();
         let i = i;  // Dupe loop counter into local scope
         let bucket = bucket.clone();
@@ -75,26 +80,13 @@ async fn main() -> Result<()> {
         };
 
         spawn(async move {
-            println!(
-                "#{}: Started {} -> {}",
-                i,
-                src_url,
-                dest_path.file_name().and_then(|name| name.to_str()).unwrap_or("")
-            );
+            let dest_name = dest_path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            println!("#{}: Started {} -> {}", i, src_url, dest_name);
             match download_file(client, src_url.clone(), &dest_path, &limiter).await {
-                Ok(_) => println!(
-                    "#{}: Completed {} -> {}",
-                    i,
-                    src_url,
-                    dest_path.file_name().and_then(|name| name.to_str()).unwrap_or("")
-                ),
-                Err(err) => eprintln!(
-                    "#{}: Failed {} -> {}: {}",
-                    i,
-                    src_url,
-                    dest_path.file_name().and_then(|name| name.to_str()).unwrap_or(""),
-                    err
-                ),
+                Ok(_) =>
+                    println!("#{}: Completed {} -> {}", i, src_url, dest_name ),
+                Err(err) =>
+                    eprintln!("#{}: Failed {} -> {}: {}", i, src_url, dest_name, err),
             }
         });
     }
