@@ -141,7 +141,7 @@ mod tests {
     use crate::copy_with_speedlimit::BUFFER_SIZE;
     use rand::{thread_rng, RngCore};
     use warp::Filter;
-    use std::io::{BufWriter, Write};
+    use std::io::{BufWriter, Write, Read};
     use std::fs::File;
     use tokio::task::spawn;
     use tokio::runtime::Builder;
@@ -149,6 +149,10 @@ mod tests {
 
     #[test]
     fn successful_downloads() {
+        // NB: Yes, I know that testing of private APIs is considered bad practice.
+        // ATM download_files is the closest thing to pub api we have.
+        // I also have plans to move download procedure into library,
+        // so it seems fine in this particular situation
         let src_dir = tempfile::tempdir().unwrap();
         // List of sample file sizes, also used as their names
         let sample_files = [
@@ -185,7 +189,7 @@ mod tests {
             .unwrap()
             .block_on(async move {
                 // Routes for all files in source test directory
-                let routes = warp::path("files").and(warp::fs::dir(src_path));
+                let routes = warp::path("files").and(warp::fs::dir(src_path.clone()));
                 // Construct shutdown channel
                 let (tx, rx) = channel();
                 // Construct server future
@@ -205,7 +209,17 @@ mod tests {
                         name)
                     );
                 // Simple single-threaded unbounded download
-                super::download_files(files, dest_dir, 1, 0).await;
+                super::download_files(files.iter().map(|(url, name)| (url, name)), &dest_dir, 1, 0).await;
+                // Validate files in dest_dir against same files in src_dir
+                for (_, name) in &files {
+                    let mut src_data = Vec::new();
+                    File::open(src_path.join(name)).unwrap().read_to_end(&mut src_data).unwrap();
+                    
+                    let mut dest_data = Vec::new();
+                    File::open(dest_dir.path().join(name)).unwrap().read_to_end(&mut dest_data).unwrap();
+
+                    assert_eq!(src_data, dest_data);
+                }
                 // At the end, send shutdown signal and wait for termination
                 let _ = tx.send(());
                 let _ = jh.await;
