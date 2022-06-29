@@ -2,8 +2,9 @@ use std::io::{Result, ErrorKind};
 
 use tokio::task::yield_now;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
-
-const BUFFER_SIZE: usize = 8 * 1_024;
+/// Size of buffer in bytes, used by asynchronous copy
+/// Public to whole crate because of use in tests for main download function
+pub(crate) const BUFFER_SIZE: usize = 8 * 1_024;
 /// Performs asynchronous copying from one byte stream into another, with respect to specified speed limiter
 /// 
 /// # Arguments

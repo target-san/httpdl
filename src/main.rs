@@ -58,7 +58,7 @@ async fn main() -> Result<()> {
 }
 
 async fn download_files<'a>(
-    files:          impl Iterator<Item = (&'a str, &'a str)>,
+    files:          impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
     dest_dir:       impl AsRef<Path>,
     threads_num:    usize,
     speed_limit:    usize
@@ -66,10 +66,12 @@ async fn download_files<'a>(
     let bucket = Arc::new(Mutex::new(TokenBucket::new(speed_limit)));
     let client = Client::new();
 
-    let files = futures::stream::iter(files.enumerate());
+    let files = futures::stream::iter(files.into_iter().enumerate());
 
     files
         .map(|(i, (url_str, name_str))| {
+            let url_str = url_str.as_ref();
+            let name_str = name_str.as_ref();
             println!("#{}: Started {} -> {}", i, url_str, name_str);
             
             let src_url   = url_str.to_string();
@@ -132,4 +134,81 @@ async fn download_file(
     dest_file.flush().await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::copy_with_speedlimit::BUFFER_SIZE;
+    use rand::{thread_rng, RngCore};
+    use warp::Filter;
+    use std::io::{BufWriter, Write};
+    use std::fs::File;
+    use tokio::task::spawn;
+    use tokio::runtime::Builder;
+    use tokio::sync::oneshot::channel;
+
+    #[test]
+    fn successful_downloads() {
+        let src_dir = tempfile::tempdir().unwrap();
+        // List of sample file sizes, also used as their names
+        let sample_files = [
+            0,
+            10,
+            BUFFER_SIZE - 1,
+            BUFFER_SIZE,
+            BUFFER_SIZE + 1,
+            BUFFER_SIZE * 2,
+            BUFFER_SIZE * 256
+        ];
+        // Generate sample files in source directory
+        (&sample_files)
+            .map(|size| {
+                // Generate 
+                let mut buf = vec![0u8; size];
+                thread_rng().fill_bytes(&mut buf);
+
+                let file = File::create(src_dir.path().join(size.to_string())).unwrap();
+                let mut file = BufWriter::new(file);
+
+                file.write_all(&buf).unwrap();
+                file.flush().unwrap();
+            })
+        ;
+        // Generate parameters for files download
+        let src_path = src_dir.path().to_owned();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let dl_names = (&sample_files).map(|size| size.to_string());
+        // Perform async download, with local stub server running
+        Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                // Routes for all files in source test directory
+                let routes = warp::path("files").and(warp::fs::dir(src_path));
+                // Construct shutdown channel
+                let (tx, rx) = channel();
+                // Construct server future
+                let (addr, server) = warp::serve(routes)
+                    .bind_with_graceful_shutdown(
+                        ([127, 0, 0, 1], 0),
+                        async {
+                            rx.await.ok();
+                        }
+                    );
+                // Spawn the server into a runtime
+                let jh = spawn(server);
+                // Download files in question
+                let files = dl_names
+                    .map(|name| (
+                        format!("http://127.0.0.1:{}/files/{}", addr.port(), name),
+                        name)
+                    );
+                // Simple single-threaded unbounded download
+                super::download_files(files, dest_dir, 1, 0).await;
+                // At the end, send shutdown signal and wait for termination
+                let _ = tx.send(());
+                let _ = jh.await;
+            });
+    }
 }
