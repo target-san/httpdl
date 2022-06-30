@@ -98,9 +98,11 @@ async fn download_files(
     speed_limit: usize,
     notifier: impl Sink<(usize, String, String, Progress)> + Clone + Send + Unpin,
 ) {
-    let bucket = Arc::new(Mutex::new(TokenBucket::new(speed_limit)));
+    // Spawn HTTP client
     let client = Client::new();
-
+    // Create token bucket and wrap it into arc-mutex for multithreaded usage
+    let bucket = Arc::new(Mutex::new(TokenBucket::new(speed_limit)));
+    // Wrap files iterator as eager async stream
     let files = futures::stream::iter(files.into_iter().enumerate());
 
     files
@@ -108,12 +110,12 @@ async fn download_files(
         // Produces futures, one per source stream item,
         // and executes up to specified number concurrently
         .for_each_concurrent(threads_num, |(i, (url_str, name_str))| {
-            // Notifier function, feeds status notification into sink
-            // and produces future to wait for send to complete, if needed
+            // Clone notification sender and download parameters
             let mut notifier = notifier.clone();
-            let src = url_str.as_ref().to_owned();
-            let dst = name_str.as_ref().to_owned();
-
+            let url = url_str.as_ref().to_owned();
+            let name = name_str.as_ref().to_owned();
+            let path = dest_dir.as_ref().join(&name);
+            // Construct limiter function, with bucket clone
             let get_limit = {
                 let bucket = bucket.clone();
                 move |amount| {
@@ -124,22 +126,23 @@ async fn download_files(
                         .unwrap_or(0)
                 }
             };
-
-            let src_url = url_str.as_ref().to_owned();
-            let dest_path = dest_dir.as_ref().join(name_str.as_ref());
+            // Clone HTTP client for per-task usage
             let client = client.clone();
-
+            // Finally, create future which will do all the heavylifting
             async move {
+                // Notify about job start
                 let _ = notifier
-                    .feed((i, src.clone(), dst.clone(), Progress::Started))
+                    .feed((i, url.clone(), name.clone(), Progress::Started))
                     .await;
-                let result = download_file(client, &src_url, &dest_path, &get_limit).await;
+                // Actual download
+                let result = download_file(client, &url, &path, &get_limit).await;
+                // Notify about job end, either successful or failed
                 let _ = notifier
-                    .feed((i, src.clone(), dst.clone(), Progress::Finished(result)))
+                    .feed((i, url.clone(), name.clone(), Progress::Finished(result)))
                     .await;
             }
         })
-        // Finally, consume whole stream by awaiting on for_each future
+        // Finally, consume whole stream by awaiting on for_each_concurrent future
         .await;
 }
 
