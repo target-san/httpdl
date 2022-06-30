@@ -1,6 +1,7 @@
 //
 // Uses from stdlib
 //
+use std::io::Read;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -12,10 +13,10 @@ use std::task::{Context, Poll};
 use anyhow::Result;
 use clap::Parser;
 use futures::channel::mpsc;
-use futures::{Stream, StreamExt, TryStreamExt, Sink};
+use futures::{Stream, StreamExt, TryStreamExt, Sink, SinkExt};
 use reqwest::Client;
 use tokio::fs;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio_util::io::StreamReader;
 //
 // Submodules
@@ -30,8 +31,7 @@ mod copy_with_speedlimit;
 use copy_with_speedlimit::copy_with_speedlimit;
 
 // Program starting point, as usual
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     // First, parse arguments
     let Config {
         dest_dir,
@@ -42,10 +42,10 @@ async fn main() -> Result<()> {
     // Now, we read whole list file and then fill files mapping
     let all_text = {
         // Open file with list of files to download
-        let mut fd = fs::File::open(&list_file).await?;
+        let mut fd = std::fs::File::open(&list_file)?;
         // Then read all of its contents into buffer
         let mut text = String::new();
-        fd.read_to_string(&mut text).await?;
+        fd.read_to_string(&mut text)?;
         text
     };
     // Next, we split the whole file into lines in-place
@@ -63,14 +63,34 @@ async fn main() -> Result<()> {
         })
         .fuse();
 
-    let (dl, _) = new_downloader(files_seq, Path::new(&dest_dir), threads_num, speed_limit);
-    dl.await;
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async move {
+            let files_seq = files_seq;
+            let (dl, mut notify) = new_downloader(files_seq, Path::new(&dest_dir), threads_num, speed_limit);
+            let notifier = tokio::spawn(async move {
+                while let Some((i, src, dst, status)) = notify.next().await {
+                    match status {
+                        Progress::Started =>
+                            println!("#{} {} -> {}: Download started", i, src, dst),
+                        Progress::Finished(Ok(_)) =>
+                            println!("#{} {} -> {}: Download finished", i, src, dst),
+                        Progress::Finished(Err(err)) =>
+                            eprintln!("#{} {} -> {}: Download failed due to {}", i, src, dst, err),
+                    }
+                }
+            });
+            
+            dl.await;
+            let _ = notifier.await;
+        });
 
     Ok(())
 }
 
 /// Status of specific download job
-enum Progress {
+pub enum Progress {
     /// Job has started
     Started,
     /// Job either finished successfully or failed
@@ -81,7 +101,7 @@ enum Progress {
 /// 
 /// Unlike underlying UnboundedReceiver, closes itself explicitly upon drop,
 /// thus preventing progress messages being sent if not needed
-struct Notifier<T>(mpsc::UnboundedReceiver<T>);
+pub struct Notifier<T>(mpsc::UnboundedReceiver<T>);
 
 impl<T> Notifier<T> {
     fn new(recv: mpsc::UnboundedReceiver<T>) -> Notifier<T> { Notifier(recv) }
@@ -104,15 +124,34 @@ impl<T> Stream for Notifier<T> {
         self.0.size_hint()
     }
 }
-
-fn new_downloader(
+/// Creates new asynchronous file downloader, along with progress notification stream
+/// 
+/// # Arguments
+/// * files - sequence of pairs of source URL and destination file name
+/// * dest_dir - destination directory, where to put downloaded files
+/// * thread_num - number of concurrent downloads
+/// * speed_limit - max download speed, in bytes per second
+/// 
+/// # Returns
+/// Returns pair of values
+/// * first element is downloader's future;
+///     it completes when all downloads are finished, one or another way
+/// * second element is a notification stream which reports states of download jobs;
+///     please note that in order to receive notifications in time, client code should
+///     spawn separate future which will pull data from stream
+/// 
+/// Downloader future starts multiple child futures, one future per downloaded file,
+/// and up to 'threads_num' futures at once. Files are downloaded into specified directory.
+/// Process isn't terminated if some file fails, instead failure is reported through
+/// notifier channel.
+pub fn new_downloader(
     files: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
     dest_dir: impl AsRef<Path>,
     threads_num: usize,
     speed_limit: usize,
 ) -> (
     impl Future<Output = ()>,
-    impl Stream<Item = (usize, impl AsRef<str>, impl AsRef<str>, Progress)>
+    Notifier<(usize, String, String, Progress)>
 ) {
     let (send, recv) = mpsc::unbounded();
 
@@ -128,7 +167,7 @@ async fn download_files(
     dest_dir:    impl AsRef<Path>,
     threads_num: usize,
     speed_limit: usize,
-    notifier:    impl Sink<(usize, String, String, Progress)>
+    notifier:    impl Sink<(usize, String, String, Progress)> + Clone + Send + Unpin
 ) {
     let bucket = Arc::new(Mutex::new(TokenBucket::new(speed_limit)));
     let client = Client::new();
@@ -136,45 +175,35 @@ async fn download_files(
     let files = futures::stream::iter(files.into_iter().enumerate());
 
     files
-        // Transform simpleeager stream of values into stream of futures
-        // (don't mix with stream as sequence of futures)
-        .map(|(i, (url_str, name_str))| {
-            let url_str = url_str.as_ref();
-            let name_str = name_str.as_ref();
-            println!("#{}: Started {} -> {}", i, url_str, name_str);
+        // Combination of map, buffer_unordered and for_each
+        // Produces futures, one per source stream item,
+        // and executes up to specified number concurrently
+        .for_each_concurrent(threads_num, |(i, (url_str, name_str))| {
+            // Notifier function, feeds status notification into sink
+            // and produces future to wait for send to complete, if needed
+            let mut notifier = notifier.clone();
+            let src = url_str.as_ref().to_owned();
+            let dst = name_str.as_ref().to_owned();
 
-            let src_url = url_str.to_string();
-            let dest_path = dest_dir.as_ref().join(name_str);
-
-            let client = client.clone();
-            // Construct separate avatar of token bucket for each task
-            let bucket = bucket.clone();
-            let limiter = move |amount| {
-                bucket
-                    .try_lock()
-                    .ok()
-                    .map(|mut inner| inner.take(amount))
-                    .unwrap_or(0)
+            let get_limit = {
+                let bucket = bucket.clone();
+                move |amount| {
+                    bucket
+                        .try_lock()
+                        .ok()
+                        .map(|mut inner| inner.take(amount))
+                        .unwrap_or(0)
+                }
             };
 
+            let src_url = url_str.as_ref().to_owned();
+            let dest_path = dest_dir.as_ref().join(name_str.as_ref());
+            let client = client.clone();
+            
             async move {
-                let result = download_file(client, &src_url, &dest_path, &limiter).await;
-
-                (i, src_url, dest_path, result)
-            }
-        })
-        // Make stream of future values execute up to threads_num futures in parallel
-        .buffer_unordered(threads_num)
-        // Execute async action on each result of future from map
-        .for_each(|(i, src_url, dest_path, result)| async move {
-            let dest_name = dest_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("");
-
-            match result {
-                Ok(_) => println!("#{}: Completed {} -> {}", i, src_url, dest_name),
-                Err(err) => eprintln!("#{}: Failed {} -> {}: {}", i, src_url, dest_name, err),
+                let _ = notifier.feed((i, src.clone(), dst.clone(), Progress::Started)).await;
+                let result = download_file(client, &src_url, &dest_path, &get_limit).await;
+                let _ = notifier.feed((i, src.clone(), dst.clone(), Progress::Finished(result))).await;
             }
         })
         // Finally, consume whole stream by awaiting on for_each future
