@@ -1,14 +1,18 @@
 //
 // Uses from stdlib
 //
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 //
 // Uses from external crates
 //
 use anyhow::Result;
 use clap::Parser;
-use futures::{StreamExt as _, TryStreamExt as _};
+use futures::channel::mpsc;
+use futures::{Stream, StreamExt, TryStreamExt, Sink};
 use reqwest::Client;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
@@ -59,16 +63,72 @@ async fn main() -> Result<()> {
         })
         .fuse();
 
-    download_files(files_seq, Path::new(&dest_dir), threads_num, speed_limit).await;
+    let (dl, _) = new_downloader(files_seq, Path::new(&dest_dir), threads_num, speed_limit);
+    dl.await;
 
     Ok(())
 }
 
-async fn download_files<'a>(
+/// Status of specific download job
+enum Progress {
+    /// Job has started
+    Started,
+    /// Job either finished successfully or failed
+    Finished(Result<()>),
+}
+
+/// Notifier stream
+/// 
+/// Unlike underlying UnboundedReceiver, closes itself explicitly upon drop,
+/// thus preventing progress messages being sent if not needed
+struct Notifier<T>(mpsc::UnboundedReceiver<T>);
+
+impl<T> Notifier<T> {
+    fn new(recv: mpsc::UnboundedReceiver<T>) -> Notifier<T> { Notifier(recv) }
+}
+
+impl<T> Drop for Notifier<T> {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
+impl<T> Stream for Notifier<T> {
+    type Item = T;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.0).poll_next(cx)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+}
+
+fn new_downloader(
     files: impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
     dest_dir: impl AsRef<Path>,
     threads_num: usize,
     speed_limit: usize,
+) -> (
+    impl Future<Output = ()>,
+    impl Stream<Item = (usize, impl AsRef<str>, impl AsRef<str>, Progress)>
+) {
+    let (send, recv) = mpsc::unbounded();
+
+    let dl_future = async move {
+        download_files(files, dest_dir, threads_num, speed_limit, send).await
+    };
+
+    (dl_future, Notifier::new(recv))
+}
+
+async fn download_files(
+    files:       impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
+    dest_dir:    impl AsRef<Path>,
+    threads_num: usize,
+    speed_limit: usize,
+    notifier:    impl Sink<(usize, String, String, Progress)>
 ) {
     let bucket = Arc::new(Mutex::new(TokenBucket::new(speed_limit)));
     let client = Client::new();
@@ -76,6 +136,8 @@ async fn download_files<'a>(
     let files = futures::stream::iter(files.into_iter().enumerate());
 
     files
+        // Transform simpleeager stream of values into stream of futures
+        // (don't mix with stream as sequence of futures)
         .map(|(i, (url_str, name_str))| {
             let url_str = url_str.as_ref();
             let name_str = name_str.as_ref();
@@ -101,7 +163,9 @@ async fn download_files<'a>(
                 (i, src_url, dest_path, result)
             }
         })
+        // Make stream of future values execute up to threads_num futures in parallel
         .buffer_unordered(threads_num)
+        // Execute async action on each result of future from map
         .for_each(|(i, src_url, dest_path, result)| async move {
             let dest_name = dest_path
                 .file_name()
@@ -113,6 +177,7 @@ async fn download_files<'a>(
                 Err(err) => eprintln!("#{}: Failed {} -> {}: {}", i, src_url, dest_name, err),
             }
         })
+        // Finally, consume whole stream by awaiting on for_each future
         .await;
 }
 
@@ -208,8 +273,8 @@ mod tests {
                     )
                 });
                 // Simple single-threaded unbounded download
-                super::download_files(files.iter().map(|(url, name)| (url, name)), &dest_dir, 1, 0)
-                    .await;
+                let (dl, _) = super::new_downloader(files.iter().map(|(url, name)| (url, name)), &dest_dir, 1, 0);
+                dl.await;
                 // Validate files in dest_dir against same files in src_dir
                 for (_, name) in &files {
                     let mut src_data = Vec::new();
