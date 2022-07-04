@@ -129,6 +129,10 @@ async fn download_files(
             // Clone HTTP client for per-task usage
             let client = client.clone();
             // Finally, create future which will do all the heavylifting
+            // It seems that for_each_concurrent executes specified number
+            // of futures in interleaving manner, as single bigger future,
+            // so we explicitly spawn each IO future and only await
+            // for its completion inside main stream
             let finisher = tokio::spawn(async move {
                 // Notify about job start
                 let _ = notifier
