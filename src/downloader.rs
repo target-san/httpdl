@@ -96,7 +96,7 @@ async fn download_files(
     dest_dir: impl AsRef<Path>,
     threads_num: usize,
     speed_limit: usize,
-    notifier: impl Sink<(usize, String, String, Progress)> + Clone + Send + Unpin,
+    notifier: impl Sink<(usize, String, String, Progress)> + Clone + Send + Unpin + 'static,
 ) {
     // Spawn HTTP client
     let client = Client::new();
@@ -129,7 +129,11 @@ async fn download_files(
             // Clone HTTP client for per-task usage
             let client = client.clone();
             // Finally, create future which will do all the heavylifting
-            async move {
+            // It seems that for_each_concurrent executes specified number
+            // of futures in interleaving manner, as single bigger future,
+            // so we explicitly spawn each IO future and only await
+            // for its completion inside main stream
+            let finisher = tokio::spawn(async move {
                 // Notify about job start
                 let _ = notifier
                     .feed((i, url.clone(), name.clone(), Progress::Started))
@@ -140,7 +144,9 @@ async fn download_files(
                 let _ = notifier
                     .feed((i, url.clone(), name.clone(), Progress::Finished(result)))
                     .await;
-            }
+            });
+            // Wrap into another future - we need () as return type, not Result<(), _>
+            async move { let _ = finisher.await; }
         })
         // Finally, consume whole stream by awaiting on for_each_concurrent future
         .await;
